@@ -1,0 +1,13 @@
+# Charts must NEVER be uploaded - they only go PC -> OneDrive -> iPad.
+*.pdf
+*.PDF
+_charts_index.json
+*.part
+
+# Windows / editor clutter
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# local Claude/test settings
+.claude/
