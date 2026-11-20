@@ -5,7 +5,7 @@ import * as store from './store.js';
 import { parseAirportPdf, enrichFromIndex, compareNumbers } from './pdfindex.js';
 import { ChartViewer } from './viewer.js';
 
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.0.1';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -27,7 +27,7 @@ const KV_DEFAULTS = {
   last: {}, index: null, rotation: {},
 };
 
-const S = { airports: new Map(), kv: {}, ann: new Map(), view: null };
+const S = { airports: new Map(), kv: {}, ann: new Map(), view: null, missing: new Set() };
 const app = document.getElementById('app');
 
 // ================================================================ state
@@ -209,6 +209,7 @@ function airportRow(a) {
     <span class="apt-code">${esc(a.icao)}${a.iata ? `<small>${esc(a.iata)}</small>` : ''}</span>
     <span class="apt-name">${esc(a.name)}<small>${esc([a.city, a.country].filter(Boolean).join(', '))}</small></span>
     ${a.flags?.length ? '<span class="warnmark" title="Check this PDF">⚠</span>' : ''}
+    ${S.missing.has(a.icao) ? '<span class="pill red">FILE MISSING — re-import</span>' : ''}
     ${st === 'expired' ? '<span class="pill red">EXPIRED</span>' : st === 'future' ? '<span class="pill amber">NOT YET</span>' : ''}
   </button>`;
 }
@@ -531,7 +532,7 @@ async function renderViewer(icao, tab, key, pidx) {
     if (S.cur !== cur) return;
     const ann = await store.get('annotations', annId(a, key, pidx));
     if (S.cur !== cur) return;
-    const rot = S.kv.rotation[`${icao}|${key}`] || 0;
+    const rot = S.kv.rotation[`${icao}|${key}`] ? 90 : 0;
     await viewer.show(page, { rotation: rot, strokes: ann?.strokes || [] });
     if (S.cur === cur) loading.style.display = 'none';
     // pre-load the next chart's page so swiping is quick
@@ -601,7 +602,7 @@ async function renderSettings() {
         <div class="tablewrap"><table class="apts">
           <tr><th>Airport</th><th>Cycle</th><th>Imported</th><th>Size</th><th></th></tr>
           ${sortedAirports().map((a) => `<tr>
-            <td><b>${esc(a.icao)}</b> ${esc(a.iata || '')}<br><small>${esc(a.name)}</small>${a.flags?.length ? `<br><small class="warn">⚠ ${a.flags.map(esc).join('<br>⚠ ')}</small>` : ''}</td>
+            <td><b>${esc(a.icao)}</b> ${esc(a.iata || '')}<br><small>${esc(a.name)}</small>${S.missing.has(a.icao) ? '<br><small class="err">⚠ Chart file missing on this iPad — import it again</small>' : ''}${a.flags?.length ? `<br><small class="warn">⚠ ${a.flags.map(esc).join('<br>⚠ ')}</small>` : ''}</td>
             <td>${cycleBadge(a)}</td>
             <td><small>${fmtWhen(a.importedAt)}</small></td>
             <td><small>${fmtBytes(a.size)}<br>${a.charts.length} charts</small></td>
@@ -671,6 +672,7 @@ async function importFiles(files) {
       Object.assign(rec, { file: name, where, size: f.size, importedAt: Date.now(), source: f.name });
       await store.put('airports', rec);
       S.airports.set(rec.icao, rec);
+      S.missing.delete(rec.icao);
       if (prior) { dropDoc(rec.icao); await store.deletePdf(prior.file, prior.where); }
       res.ok.push(rec.icao);
       if (rec.flags.length) res.flagged.push(`${rec.icao}: ${rec.flags.join(' ')}`);
@@ -776,7 +778,7 @@ const actions = {
   'v-rotate': () => {
     const c = S.cur; if (!c || !viewer) return;
     const k = `${c.icao}|${c.key}`;
-    const r = ((S.kv.rotation[k] || 0) + 90) % 360;
+    const r = S.kv.rotation[k] ? 0 : 90; // upright <-> turned 90°, never upside down
     if (r) S.kv.rotation[k] = r; else delete S.kv.rotation[k];
     setKv('rotation', S.kv.rotation);
     viewer.setRotation(r);
@@ -831,6 +833,49 @@ async function editFlight() {
   setKv('flight', nf);
   route();
 }
+
+// ---------------------------------------------------------------- swipe back
+// Like Apple's apps: drag right from the left edge of the screen, or swipe right
+// along the top bar, to go back. Touch events keep coming even while a list scrolls.
+const EDGE_PX = 24;
+let swipe = null;
+function backTarget() {
+  return document.querySelector('[data-act=v-back]') || document.querySelector('header.top [data-act=nav][aria-label=Back]');
+}
+function backHint(dx) {
+  let h = document.getElementById('backhint');
+  if (!h) { h = document.createElement('div'); h.id = 'backhint'; h.textContent = '‹'; document.body.append(h); }
+  const k = Math.max(0, Math.min(1, dx / 90));
+  h.style.opacity = String(k);
+  h.style.transform = `translate(${Math.min(dx, 90) - 50}px, -50%) scale(${0.6 + 0.4 * k})`;
+  h.classList.toggle('ready', dx > 80);
+}
+document.addEventListener('touchstart', (e) => {
+  swipe = null;
+  if (e.touches.length !== 1 || !backTarget() || document.querySelector('.modal')) return;
+  const t = e.touches[0];
+  const onBar = e.target.closest('header.top, header.vbar') && !e.target.closest('input, .dimctl, .vpills');
+  if (t.clientX < EDGE_PX || onBar) swipe = { x: t.clientX, y: t.clientY, dx: 0, dy: 0 };
+}, { passive: true });
+document.addEventListener('touchmove', (e) => {
+  if (!swipe) return;
+  if (e.touches.length !== 1) { swipe = null; backHint(0); return; }
+  const t = e.touches[0];
+  swipe.dx = t.clientX - swipe.x; swipe.dy = t.clientY - swipe.y;
+  if (Math.abs(swipe.dy) > 60 && Math.abs(swipe.dy) > swipe.dx) { swipe = null; backHint(0); return; }
+  backHint(swipe.dx);
+}, { passive: true });
+document.addEventListener('touchend', () => {
+  if (!swipe) return;
+  const { dx, dy } = swipe;
+  swipe = null;
+  backHint(0);
+  if (dx > 80 && Math.abs(dy) < dx * 0.7) {
+    const b = backTarget();
+    if (b) b.click();
+  }
+}, { passive: true });
+document.addEventListener('touchcancel', () => { swipe = null; backHint(0); }, { passive: true });
 
 document.addEventListener('click', (e) => {
   const t = e.target.closest('[data-act]');
@@ -899,6 +944,12 @@ async function start() {
   applyTheme();
   route();
   setupServiceWorker();
+  // Check every airport's PDF is still on the device; flag any that aren't.
+  for (const a of S.airports.values()) if (!(await store.pdfExists(a.file, a.where))) S.missing.add(a.icao);
+  if (S.missing.size) {
+    route();
+    toast(`Chart files missing: ${[...S.missing].join(', ')} — import them again`);
+  }
   window.addEventListener('pagehide', flushSave);
 }
 

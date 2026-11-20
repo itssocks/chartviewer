@@ -129,6 +129,7 @@ If step 4 fails, open the app once online, wait for "Ready for offline use", and
 
 ## Using it
 
+- **Going back**: tap ‹, or swipe right from the left edge of the screen, or swipe right along the top bar.
 - **Search**: type ICAO, IATA, airport name or city on the first screen.
 - **Airport**: tabs Info / Taxi · SID · STAR · Approach · Other. The box at the top
   filters charts by title, e.g. `ILS 03`. ☆ makes a favorite.
@@ -136,7 +137,7 @@ If step 4 fails, open the app once online, wait for "Ready for offline use", and
   The tabs then sit at the top of every screen; one tap reopens the last chart you had open
   at that airport, a second tap shows its chart list. ✎ edits all three.
 - **Chart**: pinch to zoom, drag to pan, double-tap to zoom in / back to fit,
-  ⟳ rotates 90°, swipe left/right (when zoomed out) for the next/previous chart in the tab,
+  ⟳ turns the chart 90° and back upright, swipe left/right (when zoomed out) for the next/previous chart in the tab,
   ☾ night mode, ☀︎ slider dims the chart.
 - **Apple Pencil**: draws only with the Pencil; fingers always pan and zoom. Red / blue /
   black pen, thin/thick, highlighter, eraser, Undo, Clear. **Off** stops the Pencil drawing.

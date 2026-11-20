@@ -98,11 +98,22 @@ export async function loadPdf(name, where) {
   if (where === 'idb') {
     blob = await get('blobs', name);
   } else {
-    const dir = await chartsDir();
-    blob = await (await dir.getFileHandle(name)).getFile();
+    try {
+      const dir = await chartsDir();
+      blob = await (await dir.getFileHandle(name)).getFile();
+    } catch { blob = null; }
   }
-  if (!blob) throw new Error('Chart file missing on this device - import it again');
+  if (!blob) throw new Error('The chart file is missing on this iPad - import this airport again');
   return new Uint8Array(await blob.arrayBuffer());
+}
+
+/** Is the stored PDF still there? (Storage can be cleared by the system.) */
+export async function pdfExists(name, where) {
+  try {
+    if (where === 'idb') return !!(await get('blobs', name));
+    const f = await (await (await chartsDir()).getFileHandle(name)).getFile();
+    return f.size > 0;
+  } catch { return false; }
 }
 
 export async function deletePdf(name, where) {

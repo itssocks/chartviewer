@@ -11,7 +11,8 @@ const BASE_MAX_PIXELS = 6e6;    // full-page canvas size limit (iPad memory frie
 const DETAIL_MAX_PIXELS = 9e6;  // sharp "zoomed" canvas limit
 const MAX_ZOOM = 10;            // times the fit zoom
 
-export const PEN_WIDTHS = { thin: 0.9, thick: 2.2 };
+export const PEN_WIDTHS = { thin: 1.6, thick: 3.2 };
+export const EDGE_BACK_PX = 24;
 const HIGHLIGHT_WIDTH = 10;
 
 export class ChartViewer {
@@ -73,6 +74,7 @@ export class ChartViewer {
   }
 
   setRotation(rot) {
+    if (!this.page) return;
     this.rot = ((rot % 360) + 360) % 360;
     this.gen++;
     this._dims();
@@ -348,9 +350,10 @@ export class ChartViewer {
     }
     // Palm rejection: ignore fingers while the Pencil is down or just lifted.
     if (e.pointerType === 'touch' && (this.pen || Date.now() - this.penUpAt < 350)) return;
-    if (e.pointerType === 'touch' && (e.width > 60 || e.height > 60)) return; // a big contact = palm
-    try { this.stage.setPointerCapture(e.pointerId); } catch { /* */ }
     const p = this._local(e);
+    // The left screen edge is reserved for the swipe-back gesture.
+    if (e.pointerType === 'touch' && !this.pointers.size && e.clientX < EDGE_BACK_PX) return;
+    try { this.stage.setPointerCapture(e.pointerId); } catch { /* */ }
     this.pointers.set(e.pointerId, p);
     clearTimeout(this.detailTimer);
     this._gestureStart(performance.now());
@@ -475,7 +478,8 @@ function penOutline(p, w) {
     // smooth the pressure a little
     const a = p[Math.max(0, i - 1)][2], b = p[i][2], c = p[Math.min(p.length - 1, i + 1)][2];
     const pr = (a + 2 * b + c) / 4;
-    return (w * (0.35 + 0.9 * pr)) / 2;
+    // Light Pencil pressure still gives a clearly visible line.
+    return (w * (0.6 + 0.6 * pr)) / 2;
   };
   if (p.length === 1) {
     const r = rad(0), [x, y] = p[0];
