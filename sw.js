@@ -3,7 +3,7 @@
 //
 // IMPORTANT: when you change any app file, change VERSION below too,
 // so iPads pick up the new version (they'll show "App update ready").
-const VERSION = '1.0.1';
+const VERSION = '1.0.2';
 const CACHE = `chartviewer-${VERSION}`;
 const ASSETS = [
   './',

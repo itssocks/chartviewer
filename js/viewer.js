@@ -64,7 +64,7 @@ export class ChartViewer {
   async show(page, { rotation = 0, strokes = [] } = {}) {
     this.clear();
     this.page = page;
-    this.rot = rotation;
+    this.turned = !!rotation;
     this.strokes = strokes.map((s) => ({ ...s }));
     this.undo = [];
     this._dims();
@@ -75,7 +75,7 @@ export class ChartViewer {
 
   setRotation(rot) {
     if (!this.page) return;
-    this.rot = ((rot % 360) + 360) % 360;
+    this.turned = !!rot;
     this.gen++;
     this._dims();
     this.fit(false);
@@ -87,6 +87,9 @@ export class ChartViewer {
     const p = this.page;
     const v0 = p.getViewport({ scale: 1, rotation: p.rotate });
     this.W0 = v0.width; this.H0 = v0.height;
+    // "Turned": portrait charts turn clockwise, landscape charts anticlockwise,
+    // so both end up the right way round (never upside down).
+    this.rot = this.turned ? (this.W0 > this.H0 ? 270 : 90) : 0;
     const r = (p.rotate + this.rot) % 360;
     this.vpRotation = r;
     const v = p.getViewport({ scale: 1, rotation: r });

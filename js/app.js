@@ -5,7 +5,7 @@ import * as store from './store.js';
 import { parseAirportPdf, enrichFromIndex, compareNumbers } from './pdfindex.js';
 import { ChartViewer } from './viewer.js';
 
-export const APP_VERSION = '1.0.1';
+export const APP_VERSION = '1.0.2';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
 
