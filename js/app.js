@@ -8,7 +8,7 @@ import { TEMPLATES, templateById, makeNotePage } from './notepad.js';
 import { Gps, parseMagvar } from './gps.js';
 import { georefFromText, linesFromOps, toChart } from './georef.js';
 
-export const APP_VERSION = '1.4.1';
+export const APP_VERSION = '1.4.2';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
 

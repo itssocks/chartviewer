@@ -35,8 +35,13 @@ export class ChartViewer {
     this.detail = null;
     this.svg = document.createElementNS(SVGNS, 'svg');
     this.svg.setAttribute('class', 'pv-ink');
+    // gView = the current zoom/pan as an SVG transform (re-drawn as vectors, so notes
+    // and the GPS plane stay sharp - a CSS transform made Safari stretch a picture);
+    // g = rotation of the page inside it.
+    this.gView = document.createElementNS(SVGNS, 'g');
     this.g = document.createElementNS(SVGNS, 'g');
-    this.svg.append(this.g);
+    this.gView.append(this.g);
+    this.svg.append(this.gView);
     // Own-ship (GPS) icon, drawn in page units inside the rotated group, kept at a
     // constant on-screen size.
     this.own = null;
@@ -48,7 +53,8 @@ export class ChartViewer {
     //  1. .pv-page  - full-page canvas, moved/zoomed with a CSS transform (fast, blurry when zoomed)
     //  2. .pv-sharp - canvas drawn at exactly the screen's pixels for the visible part, NOT
     //                 inside the zoomed layer, so Safari never stretches it (sharp)
-    //  3. .pv-inkwrap - notes + GPS icon (vector), same transform as layer 1
+    //  3. .pv-inkwrap - notes + GPS icon: a screen-sized SVG whose contents get the zoom as
+    //                   an SVG transform, so they're drawn as sharp vectors at any zoom
     this.inkWrap = el('div', 'pv-inkwrap');
     this.inkWrap.append(this.svg);
     this.inner.append(this.paper);
@@ -116,13 +122,8 @@ export class ChartViewer {
     this.vpRotation = r;
     const v = p.getViewport({ scale: 1, rotation: r });
     this.W = v.width; this.H = v.height;
-    for (const e of [this.inner, this.inkWrap]) {
-      e.style.width = this.W + 'px';
-      e.style.height = this.H + 'px';
-    }
-    this.svg.setAttribute('width', this.W);
-    this.svg.setAttribute('height', this.H);
-    this.svg.setAttribute('viewBox', `0 0 ${this.W} ${this.H}`);
+    this.inner.style.width = this.W + 'px';
+    this.inner.style.height = this.H + 'px';
     const m = { 0: [1, 0, 0, 1, 0, 0], 90: [0, 1, -1, 0, this.H0, 0], 180: [-1, 0, 0, -1, this.W0, this.H0], 270: [0, -1, 1, 0, 0, this.W0] }[this.rot];
     this.g.setAttribute('transform', `matrix(${m.join(' ')})`);
   }
@@ -181,16 +182,33 @@ export class ChartViewer {
   /** Move all layers to a view (the sharp layer follows until it's redrawn). */
   _applyTransform(tx, ty, s, animate = false) {
     const tr = animate ? 'transform .18s ease-out' : 'none';
-    for (const e of [this.inner, this.inkWrap]) {
-      e.style.transition = tr;
-      e.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
-    }
+    this.inner.style.transition = tr;
+    this.inner.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
+    this._inkView(tx, ty, s, animate);
     const a = this.sharpAt;
     if (this.sharp && a) {
       const r = s / a.s;
       this.sharp.style.transition = tr;
       this.sharp.style.transform = `translate(${r * (a.L - a.tx) + tx - a.L}px, ${r * (a.T - a.ty) + ty - a.T}px) scale(${r})`;
     }
+  }
+
+  /** Zoom/pan of the notes + GPS layer, animated like the chart (ease-out, 180 ms). */
+  _inkView(tx, ty, s, animate) {
+    cancelAnimationFrame(this._inkAnim);
+    const set = (x, y, k) => {
+      this.inkAt = [x, y, k];
+      this.gView.setAttribute('transform', `translate(${x} ${y}) scale(${k})`);
+    };
+    const from = this.inkAt;
+    if (!animate || !from) { set(tx, ty, s); return; }
+    const t0 = performance.now();
+    const step = (now) => {
+      const u = Math.min(1, (now - t0) / 180), e = 1 - (1 - u) ** 3; // ease-out
+      set(from[0] + (tx - from[0]) * e, from[1] + (ty - from[1]) * e, from[2] + (s - from[2]) * e);
+      if (u < 1) this._inkAnim = requestAnimationFrame(step);
+    };
+    this._inkAnim = requestAnimationFrame(step);
   }
 
   /**
