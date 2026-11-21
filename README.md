@@ -68,6 +68,27 @@ It never updates by itself in the middle of a flight.
 
 ---
 
+## Weather (METAR / TAF) setup (one time, about 5 minutes)
+
+The weather comes from aviationweather.gov (free, worldwide, includes Panama). That site doesn't
+let web apps on other sites read it directly, so you put a tiny free relay on Cloudflare that
+fetches it for your app. It only forwards METAR/TAF requests for airport codes.
+
+1. Make a free account at <https://dash.cloudflare.com> (the free plan allows 100,000 requests a day).
+2. Left menu: **Workers & Pages** → **Create** → **Create Worker** (the Hello World one).
+   Name it `chartviewer-wx` → **Deploy**.
+3. Click **Edit code**. Delete everything in the editor, paste the whole contents of
+   `tools/weather-relay.js` from this folder, then click **Deploy**.
+4. Copy the worker's address, e.g. `https://chartviewer-wx.yourname.workers.dev`.
+   (Opening it in a browser shows "Chart Viewer weather relay: use /metar?ids=XXXX" - that's correct.)
+5. In the app: ⚙︎ → **Weather (METAR / TAF)** → paste the address → **Save & test**. It should say **✓ Works**.
+
+Each airport screen then shows the latest METAR with its flight category (VFR / MVFR / IFR / LIFR)
+and age; tap it for the TAF. Reports are saved, so offline you still see the last one with its age
+(amber after 75 min, red after 3 h). Your DEP/ARR/ALT airports show their category on the home screen.
+
+---
+
 ## 2. Install it on the iPad
 
 1. On the iPad open **Safari** (must be Safari) and go to `https://YOUR-NAME.github.io/chartviewer/`.

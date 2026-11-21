@@ -6,7 +6,7 @@ import { parseAirportPdf, enrichFromIndex, compareNumbers } from './pdfindex.js'
 import { ChartViewer } from './viewer.js';
 import { TEMPLATES, templateById, makeNotePage } from './notepad.js';
 
-export const APP_VERSION = '1.2.0';
+export const APP_VERSION = '1.3.0';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -25,7 +25,7 @@ const KV_DEFAULTS = {
   favorites: [], recents: [], flight: { dep: '', arr: '', alt: '' },
   theme: 'auto', chartNight: false, dim: 1,
   tool: { kind: 'pen', color: 'red', width: 'thin' },
-  last: {}, index: null, rotation: {}, rwy: {}, lastNote: '', lastBackup: 0,
+  last: {}, index: null, rotation: {}, rwy: {}, wx: {}, wxRelay: '', lastNote: '', lastBackup: 0,
 };
 
 const S = { airports: new Map(), kv: {}, ann: new Map(), view: null, missing: new Set(), notes: new Map() };
@@ -226,11 +226,14 @@ function savedChartRow(item, kind) {
 
 function airportRow(a, slot = '') {
   const st = cycleState(a);
+  const w = slot ? wxOf(a.icao) : null;
+  const cat = w?.metar && Date.now() - w.metar.obs < 3 * 3600e3 ? catBadge(w.metar.cat) : '';
   return `<button class="row apt-row" data-act="open-airport" data-icao="${esc(a.icao)}">
     ${slot ? `<span class="pill slot">${slot}</span>` : ''}
     <span class="apt-code">${esc(a.icao)}${a.iata ? `<small>${esc(a.iata)}</small>` : ''}</span>
     <span class="apt-name">${esc(a.name)}<small>${esc([a.city, a.country].filter(Boolean).join(', '))}</small></span>
     ${a.flags?.length ? '<span class="warnmark" title="Check this PDF">⚠</span>' : ''}
+    ${cat}
     ${S.missing.has(a.icao) ? '<span class="pill red">FILE MISSING — re-import</span>' : ''}
     ${st === 'expired' ? '<span class="pill red">EXPIRED</span>' : st === 'future' ? '<span class="pill amber">NOT YET</span>' : ''}
   </button>`;
@@ -311,6 +314,9 @@ function fillHomeResults() {
   const allRec = S.kv.recents.filter((r) => S.airports.has(r.icao));
   const rec = S.allRecents ? allRec : allRec.slice(0, 5);
   const fl = SLOTS.map(([s, l]) => [l, S.airports.get(S.kv.flight[s])]).filter(([, a]) => a);
+  if (fl.length && relayBase() && fl.some(([, a]) => !wxOf(a.icao) || Date.now() - wxOf(a.icao).fetched > WX_REFRESH)) {
+    fetchWx(fl.map(([, a]) => a.icao)).then((ok) => { if (ok && location.hash.replace(/^#\/?/, '') === '') fillHomeResults(); });
+  }
   const groups = new Map();
   for (const a of sortedAirports()) {
     const k = countryName(a);
@@ -380,7 +386,9 @@ function renderAirport(icao, tab) {
       return `<button class="tab ${t.id === tab ? 'on' : ''} ${n ? '' : 'none'}" data-act="nav" data-replace="1" data-to="#/a/${esc(icao)}/${t.id}">${t.label}<small>${n}</small></button>`;
     }).join('')}</nav>
     ${rwyBar(a)}
+    <div id="wxbox">${wxStrip(a)}</div>
     <main class="scroll" id="chartlist"></main>`;
+  autoWx(a);
   const inp = document.getElementById('chq');
   const fill = () => {
     const box = document.getElementById('chartlist');
@@ -406,6 +414,93 @@ function renderAirport(icao, tab) {
   fill();
   S.kv.last[icao] = { ...(S.kv.last[icao] || {}), tab };
   setKv('last', S.kv.last);
+}
+
+// ---------------------------------------------------------------- weather (METAR / TAF)
+// Fetched through your own relay (see README), cached on the iPad so the last
+// report stays readable offline, always shown with its age.
+
+const WX_REFRESH = 10 * 60e3;
+const wxOf = (icao) => (S.kv.wx || {})[icao];
+const relayBase = () => (S.kv.wxRelay || '').trim().replace(/\/+$/, '');
+let wxBusy = false;
+
+async function fetchWx(icaos) {
+  const base = relayBase();
+  const ids = [...new Set(icaos.filter(Boolean))];
+  if (!base || !ids.length || !navigator.onLine || wxBusy) return false;
+  wxBusy = true;
+  try {
+    const get = (k) => fetch(`${base}/${k}?ids=${ids.join(',')}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const [m, t] = await Promise.all([get('metar'), get('taf')]);
+    if (!Array.isArray(m) && !Array.isArray(t)) return false;
+    const wx = { ...(S.kv.wx || {}) };
+    const now = Date.now();
+    for (const id of ids) {
+      const ms = (m || []).filter((x) => x.icaoId === id).sort((a, b) => b.obsTime - a.obsTime);
+      const ts = (t || []).filter((x) => x.icaoId === id).sort((a, b) => Date.parse(b.issueTime) - Date.parse(a.issueTime));
+      const old = wx[id] || {};
+      wx[id] = {
+        metar: ms[0] ? { raw: ms[0].rawOb, cat: ms[0].fltCat || '', obs: ms[0].obsTime * 1000 } : (Array.isArray(m) ? null : old.metar || null),
+        taf: ts[0] ? { raw: ts[0].rawTAF, issued: Date.parse(ts[0].issueTime) } : (Array.isArray(t) ? null : old.taf || null),
+        fetched: now,
+      };
+    }
+    setKv('wx', wx);
+    return true;
+  } finally {
+    wxBusy = false;
+  }
+}
+
+function ageText(ts) {
+  const min = Math.round((Date.now() - ts) / 60e3);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min} min ago`;
+  const h = Math.floor(min / 60);
+  return `${h} h ${min % 60} min ago`;
+}
+
+const catBadge = (cat) => (cat ? `<span class="fcat fcat-${esc(cat)}">${esc(cat)}</span>` : '');
+
+function tafLines(raw) {
+  return esc(raw).replace(/\s(FM\d{6}|TEMPO|BECMG|PROB\d{2}(?:\sTEMPO)?)\b/g, '<br>&nbsp;&nbsp;$1');
+}
+
+function wxStrip(a) {
+  const w = wxOf(a.icao);
+  if (!relayBase()) {
+    return w?.metar ? '' : `<div class="wx wx-setup"><span>Weather: one-time setup in ⚙︎ to show METAR / TAF here.</span></div>`;
+  }
+  if (!w) return `<div class="wx muted">${navigator.onLine ? 'Getting weather…' : 'No weather saved for this airport (offline).'}</div>`;
+  const m = w.metar;
+  const age = m ? (Date.now() - m.obs) / 60e3 : 0;
+  const ageCls = age > 180 ? 'old' : age > 75 ? 'stale' : '';
+  const open = S.wxOpen === a.icao;
+  return `<div class="wx">
+    <button class="wx-main" data-act="wx-toggle" data-icao="${esc(a.icao)}">
+      ${m ? `${catBadge(m.cat)}<span class="wxraw">${esc(m.raw)}</span>` : `<span class="wxraw muted">No METAR from ${esc(a.icao)} in the last 3 hours.</span>`}
+    </button>
+    <div class="wx-side">
+      ${m ? `<span class="wxage ${ageCls}">${ageText(m.obs)}${navigator.onLine ? '' : ' · offline'}</span>` : ''}
+      <button class="iconbtn small" data-act="wx-refresh" data-icao="${esc(a.icao)}" aria-label="Refresh weather">↻</button>
+    </div>
+    ${open ? `<div class="wx-taf">${w.taf ? `<small>TAF · issued ${ageText(w.taf.issued)}</small><div class="wxraw">${tafLines(w.taf.raw)}</div>` : '<small>No TAF for this airport.</small>'}</div>` : (w.taf ? '<small class="wx-hint">Tap for TAF</small>' : '')}
+  </div>`;
+}
+
+function refreshWxBox(a) {
+  const box = document.getElementById('wxbox');
+  if (box) box.innerHTML = wxStrip(a);
+}
+
+/** Refresh in the background if the saved report is older than 10 minutes. */
+async function autoWx(a) {
+  const w = wxOf(a.icao);
+  if (w && Date.now() - w.fetched < WX_REFRESH) return;
+  const f = S.kv.flight;
+  if (await fetchWx([a.icao, f.dep, f.arr, f.alt])) refreshWxBox(a);
+  else if (!w) refreshWxBox(a);
 }
 
 function rwyBar(a) {
@@ -772,6 +867,13 @@ async function renderSettings() {
         <p class="muted">${swOk ? '✓ Ready for offline use.' : '… Offline copy not ready yet — open the app once more while online.'}</p>
       </section>
       <section class="card">
+        <h3>Weather (METAR / TAF)</h3>
+        <p class="muted">Paste the address of your weather relay (README → "Weather setup"). Only airport codes are sent. The last report is kept for offline use and always shows its age.</p>
+        <label class="field"><input id="wx-relay" value="${esc(S.kv.wxRelay)}" placeholder="https://chartviewer-wx.yourname.workers.dev" style="text-transform:none" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="url"></label>
+        <button class="btn primary" data-act="wx-save">Save & test</button>
+        <span id="wx-test" class="muted"></span>
+      </section>
+      <section class="card">
         <h3>Menus</h3>
         <div class="seg">${[['auto', 'Auto'], ['day', 'Day'], ['night', 'Night']].map(([v, l]) => `<button class="${S.kv.theme === v ? 'on' : ''}" data-act="theme" data-v="${v}">${l}</button>`).join('')}</div>
       </section>
@@ -1019,6 +1121,29 @@ const actions = {
     route();
   },
   'more-recents': () => { S.allRecents = !S.allRecents; fillHomeResults(); },
+  'wx-toggle': (t) => { S.wxOpen = S.wxOpen === t.dataset.icao ? null : t.dataset.icao; refreshWxBox(S.airports.get(t.dataset.icao)); },
+  'wx-refresh': async (t) => {
+    const a = S.airports.get(t.dataset.icao);
+    if (!relayBase()) { go('#/settings'); return; }
+    if (!navigator.onLine) { toast('Offline — showing the last saved report'); return; }
+    t.disabled = true;
+    const ok = await fetchWx([a.icao]);
+    refreshWxBox(a);
+    if (!ok) toast('Could not get weather — check the relay in ⚙︎');
+  },
+  'wx-save': async () => {
+    const v = (document.getElementById('wx-relay')?.value || '').trim();
+    const out = document.getElementById('wx-test');
+    if (v && !/^https:\/\//i.test(v)) { out.textContent = 'The address must start with https://'; return; }
+    setKv('wxRelay', v);
+    if (!v) { out.textContent = 'Weather turned off.'; return; }
+    out.textContent = 'Testing…';
+    try {
+      const r = await fetch(`${relayBase()}/metar?ids=MPTO`);
+      const d = await r.json();
+      out.textContent = Array.isArray(d) ? `✓ Works (${d[0]?.rawOb ? d[0].rawOb.slice(0, 40) + '…' : 'no report right now'})` : '✗ Unexpected answer from the relay';
+    } catch (e) { out.textContent = `✗ Could not reach the relay (${e.message})`; }
+  },
   carry: async (t) => { const a = S.airports.get(t.dataset.icao); await carryOver(a, carryCandidates(a)); toast('Notes brought over'); route(); },
   theme: (t) => { setKv('theme', t.dataset.v); applyTheme(); route(); },
   'del-airport': async (t) => {
