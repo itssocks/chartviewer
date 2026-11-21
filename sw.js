@@ -3,7 +3,7 @@
 //
 // IMPORTANT: when you change any app file, change VERSION below too,
 // so iPads pick up the new version (they'll show "App update ready").
-const VERSION = '1.0.2';
+const VERSION = '1.1.0';
 const CACHE = `chartviewer-${VERSION}`;
 const ASSETS = [
   './',
@@ -14,6 +14,7 @@ const ASSETS = [
   'js/store.js',
   'js/pdfindex.js',
   'js/viewer.js',
+  'js/notepad.js',
   'js/opfs-worker.js',
   'vendor/pdfjs/pdf.min.mjs',
   'vendor/pdfjs/pdf.worker.min.mjs',

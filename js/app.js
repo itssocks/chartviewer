@@ -4,8 +4,9 @@ import * as pdfjsLib from '../vendor/pdfjs/pdf.min.mjs';
 import * as store from './store.js';
 import { parseAirportPdf, enrichFromIndex, compareNumbers } from './pdfindex.js';
 import { ChartViewer } from './viewer.js';
+import { TEMPLATES, templateById, makeNotePage } from './notepad.js';
 
-export const APP_VERSION = '1.0.2';
+export const APP_VERSION = '1.1.0';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -24,10 +25,10 @@ const KV_DEFAULTS = {
   favorites: [], recents: [], flight: { dep: '', arr: '', alt: '' },
   theme: 'auto', chartNight: false, dim: 1,
   tool: { kind: 'pen', color: 'red', width: 'thin' },
-  last: {}, index: null, rotation: {},
+  last: {}, index: null, rotation: {}, lastNote: '', lastBackup: 0,
 };
 
-const S = { airports: new Map(), kv: {}, ann: new Map(), view: null, missing: new Set() };
+const S = { airports: new Map(), kv: {}, ann: new Map(), view: null, missing: new Set(), notes: new Map() };
 const app = document.getElementById('app');
 
 // ================================================================ state
@@ -38,6 +39,7 @@ async function loadState() {
     const v = await store.get('kv', k);
     S.kv[k] = v === undefined ? structuredClone(KV_DEFAULTS[k]) : v;
   }
+  for (const n of await store.getAll('notes')) S.notes.set(n.id, n);
   for (const r of await store.getAll('annotations')) S.ann.set(r.id, { id: r.id, icao: r.icao, key: r.key, cycle: r.cycle, rev: r.rev, n: r.strokes.length });
 }
 function setKv(k, v) { S.kv[k] = v; store.put('kv', v, k).catch((e) => console.warn(e)); }
@@ -126,7 +128,7 @@ function dialog({ title, html = '', buttons = [{ label: 'OK', value: true, cls: 
       const b = e.target.closest('button[data-i]');
       if (!b) return;
       dialogFields = {};
-      wrap.querySelectorAll('input').forEach((i) => { dialogFields[i.id] = i.value; });
+      wrap.querySelectorAll('input').forEach((i) => { dialogFields[i.id] = i.type === 'checkbox' ? i.checked : i.value; });
       wrap.remove();
       resolve(buttons[+b.dataset.i].value);
     });
@@ -219,6 +221,7 @@ function topBar({ back, title, sub = '', right = '' }) {
     ${back ? `<button class="iconbtn" data-act="nav" data-to="${back}" aria-label="Back">‹</button>` : '<span class="logo">✈︎</span>'}
     <div class="top-title"><h1>${title}</h1>${sub ? `<div class="sub">${sub}</div>` : ''}</div>
     ${right}
+    <button class="iconbtn" data-act="kneeboard" aria-label="Kneeboard">📝</button>
     <button class="iconbtn" data-act="nav" data-to="#/settings" aria-label="Settings and import">⚙︎</button>
   </header>`;
 }
@@ -413,15 +416,21 @@ function sequence(a, tab) {
 
 function toolState() { return S.kv.tool; }
 
-function viewerShell() {
+function viewerShell(mode = 'chart') {
+  S.viewerMode = mode;
+  const chartBtns = `
+      <button class="iconbtn" data-act="kneeboard" aria-label="Kneeboard">📝</button>
+      <button class="iconbtn" data-act="v-fav" id="vfav" aria-label="Favorite">☆</button>
+      <button class="iconbtn" data-act="v-rotate" aria-label="Rotate">⟳</button>`;
+  const noteBtns = `
+      <button class="iconbtn" data-act="note-new-same" aria-label="New page">＋</button>`;
   app.innerHTML = `
-  <div class="viewer ${S.kv.chartNight ? 'chart-night' : ''}">
+  <div class="viewer ${S.kv.chartNight ? 'chart-night' : ''} ${mode === 'note' ? 'note-mode' : ''}">
     <header class="vbar">
-      <button class="iconbtn" data-act="v-back" aria-label="Back to chart list">‹</button>
+      <button class="iconbtn" data-act="v-back" aria-label="Back">‹</button>
       <div class="vpills" id="vpills"></div>
       <div class="vtitle" id="vtitle"></div>
-      <button class="iconbtn" data-act="v-fav" id="vfav" aria-label="Favorite">☆</button>
-      <button class="iconbtn" data-act="v-rotate" aria-label="Rotate">⟳</button>
+      ${mode === 'note' ? noteBtns : chartBtns}
       <button class="iconbtn ${S.kv.chartNight ? 'on' : ''}" data-act="v-night" id="vnight" aria-label="Night mode">☾</button>
       <label class="dimctl" aria-label="Brightness">☀︎<input type="range" id="vdim" min="0.25" max="1" step="0.05" value="${S.kv.dim}"></label>
     </header>
@@ -475,27 +484,12 @@ async function renderViewer(icao, tab, key, pidx) {
   if (!TABS.some((t) => t.id === tab)) tab = tabOf(c.cat);
   pidx = Math.max(0, Math.min((c.pages || 1) - 1, +pidx || 0));
 
-  if (S.view !== 'viewer' || !viewer) {
-    leaveViewer();
-    viewerShell();
-    S.view = 'viewer';
-    viewer = new ChartViewer(document.getElementById('vstage'), {
-      onSwipe: (dir) => stepChart(dir),
-      onInkChange: (strokes) => queueSave(strokes),
-      getTool: toolState,
-    });
-    setWake(true);
-  } else {
-    flushSave();
-  }
-  const cur = { icao, tab, key, pidx, a, c };
+  ensureViewer('chart');
+  const cur = { kind: 'chart', icao, tab, key, pidx, a, c };
   S.cur = cur;
 
   // header
-  document.getElementById('vpills').innerHTML = SLOTS.map(([s, l]) => {
-    const x = S.kv.flight[s];
-    return x ? `<button class="vpill ${x === icao ? 'on' : ''}" data-act="flight" data-slot="${s}"><small>${l}</small>${esc(x)}</button>` : '';
-  }).join('');
+  fillPills(icao);
   document.getElementById('vtitle').innerHTML = `<b>${esc(a.icao)} ${esc(c.number)}</b> ${esc(c.title)}${c.pages > 1 ? ` <small>(page ${pidx + 1}/${c.pages})</small>` : ''}<div class="sub">${cycleBadge(a)}</div>`;
   const fav = isFav(icao, key);
   const vf = document.getElementById('vfav');
@@ -544,9 +538,100 @@ async function renderViewer(icao, tab, key, pidx) {
   }
 }
 
+function ensureViewer(mode) {
+  if (S.view === 'viewer' && viewer && S.viewerMode === mode) { flushSave(); return; }
+  leaveViewer();
+  viewerShell(mode);
+  S.view = 'viewer';
+  viewer = new ChartViewer(document.getElementById('vstage'), {
+    onSwipe: (dir) => stepChart(dir),
+    onInkChange: (strokes) => queueSave(strokes),
+    getTool: toolState,
+  });
+  setWake(true);
+}
+
+function fillPills(icao) {
+  document.getElementById('vpills').innerHTML = SLOTS.map(([s, l]) => {
+    const x = S.kv.flight[s];
+    return x ? `<button class="vpill ${x === icao ? 'on' : ''}" data-act="flight" data-slot="${s}"><small>${l}</small>${esc(x)}</button>` : '';
+  }).join('');
+}
+
+// ================================================================ kneeboard (note pages)
+// Digital paper: one list of pages, newest first, each made from a template.
+// Pages are saved as you write and stay until you delete them.
+
+const notesInOrder = () => [...S.notes.values()].sort((a, b) => b.created - a.created);
+
+function noteTitle(tid) {
+  const d = new Date();
+  return `${templateById(tid).name} · ${d.getDate()} ${MON[d.getMonth()]} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+async function newNote(tid, replace = false) {
+  const now = Date.now();
+  const n = { id: `n${now}`, title: noteTitle(tid), template: tid, created: now, updated: now, strokes: [] };
+  await store.put('notes', n);
+  S.notes.set(n.id, n);
+  go(`#/n/${n.id}`, replace);
+}
+
+function renderNotes() {
+  leaveViewer();
+  const list = notesInOrder();
+  app.innerHTML = `
+    ${topBar({ back: '#/', title: 'Kneeboard', sub: `${list.length} page${list.length === 1 ? '' : 's'}` })}
+    ${flightBar()}
+    <main class="scroll">
+      <h3 class="sec">New page</h3>
+      <div class="tpl-grid">${TEMPLATES.map((t) => `
+        <button class="tpl" data-act="note-new" data-tpl="${t.id}"><span class="tpl-ic">${t.icon}</span>${esc(t.name)}</button>`).join('')}
+      </div>
+      ${list.length ? `<h3 class="sec">Pages</h3><div class="list">${list.map((n) => `
+        <div class="row chart-row">
+          <span class="star-sp tpl-mini">${templateById(n.template).icon}</span>
+          <button class="row-main" data-act="nav" data-to="#/n/${n.id}">
+            <span class="ttl">${esc(n.title)}<em>${n.strokes.length ? `${n.strokes.length} stroke${n.strokes.length === 1 ? '' : 's'} · ` : 'empty · '}edited ${fmtWhen(n.updated)}</em></span>
+          </button>
+          <button class="star" data-act="note-del" data-id="${n.id}" aria-label="Delete page">🗑</button>
+        </div>`).join('')}</div>` : '<p class="muted pad">No pages yet. Pick a template above.</p>'}
+    </main>`;
+}
+
+async function renderNote(id) {
+  const n = S.notes.get(id);
+  if (!n) { go('#/notes', true); return; }
+  ensureViewer('note');
+  const cur = { kind: 'note', id, n };
+  S.cur = cur;
+  setKv('lastNote', id);
+  fillPills('');
+  document.getElementById('vtitle').innerHTML = `<button class="titlebtn" data-act="note-rename"><b>${esc(n.title)}</b> ✎</button><div class="sub">${esc(templateById(n.template).name)}</div>`;
+  const list = notesInOrder();
+  const pos = list.findIndex((x) => x.id === id);
+  S.posText = `Page ${pos + 1}/${list.length}`;
+  document.getElementById('vpos').textContent = S.posText;
+  document.getElementById('vbanners').innerHTML = '';
+  document.getElementById('vloading').style.display = 'none';
+  await viewer.show(makeNotePage(n.template), { strokes: n.strokes || [] });
+}
+
 function queueSave(strokes) {
   const cur = S.cur;
   if (!cur) return;
+  if (cur.kind === 'note') {
+    const n = cur.n;
+    const snapshot = strokes.slice();
+    pendingSave = async () => {
+      n.strokes = snapshot;
+      n.updated = Date.now();
+      await store.put('notes', n);
+    };
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushSave, 600);
+    return;
+  }
   const { a, key, pidx, c } = cur;
   const id = annId(a, key, pidx);
   const snapshot = strokes.slice();
@@ -567,6 +652,13 @@ function queueSave(strokes) {
 function stepChart(dir) {
   const cur = S.cur;
   if (!cur) return;
+  if (cur.kind === 'note') {
+    const list = notesInOrder();
+    const nx = list[list.findIndex((x) => x.id === cur.id) + dir];
+    if (!nx) { toast(dir > 0 ? 'Last page' : 'First page'); return; }
+    go(`#/n/${nx.id}`, true);
+    return;
+  }
   const seq = sequence(cur.a, cur.tab);
   const pos = seq.findIndex(([x, i]) => x.key === cur.key && i === cur.pidx);
   const nx = seq[pos + dir];
@@ -611,6 +703,13 @@ async function renderSettings() {
         </table></div>
       </section>
       <section class="card">
+        <h3>Backup of your notes</h3>
+        <p class="muted">Chart notes, kneeboard pages, favorites and settings in one small file (no charts). In the share sheet choose <b>Save to Files → On My iPad</b> (or anywhere you like). Restore it if the app's storage is ever cleared.</p>
+        <button class="btn primary" data-act="backup">Save backup…</button>
+        <button class="btn" data-act="restore">Restore backup…</button>
+        <p class="muted">Last backup: ${S.kv.lastBackup ? fmtWhen(S.kv.lastBackup) : 'never'}</p>
+      </section>
+      <section class="card">
         <h3>Clean up</h3>
         <button class="btn" data-act="del-old-notes">Delete notes from old cycles</button>
         <button class="btn danger" data-act="del-all">Delete all charts</button>
@@ -647,9 +746,11 @@ async function importFiles(files) {
   await store.askPersist();
 
   const res = { ok: [], failed: [], flagged: [], older: [], carry: [] };
+  let backups = 0;
   for (const f of jsons) {
     try {
       const idx = JSON.parse(await f.text());
+      if (isBackup(idx)) { prog.remove(); await restoreBackup(idx); backups++; continue; }
       if (!Array.isArray(idx.airports)) throw new Error('not a charts index');
       const old = S.kv.index && Array.isArray(S.kv.index.airports) ? S.kv.index.airports : [];
       const map = new Map(old.map((x) => [x.icao, x]));
@@ -686,6 +787,7 @@ async function importFiles(files) {
   }
   say('Done', 1);
   prog.remove();
+  if (backups && backups === jsons.length && !pdfs.length && !res.failed.length) { route(); return; }
   await store.cleanOrphans([...S.airports.values()].filter((a) => a.where !== 'idb').map((a) => a.file));
 
   let html = `<p><b>${res.ok.length}</b> airport${res.ok.length === 1 ? '' : 's'} imported${res.ok.length ? ': ' + res.ok.map(esc).join(', ') : ''}.</p>`;
@@ -708,6 +810,84 @@ async function importFiles(files) {
     });
     if (ok) await carryOver(rec, cc);
   }
+  route();
+}
+
+// ================================================================ backup / restore
+// A backup is one JSON file with your chart notes, kneeboard pages, favorites and
+// settings. It never contains the chart PDFs.
+
+const BACKUP_FORMAT = 'chartviewer-backup';
+const BACKUP_KV = ['favorites', 'recents', 'flight', 'theme', 'chartNight', 'dim', 'tool', 'rotation', 'last', 'lastNote'];
+
+async function saveBackup() {
+  flushSave();
+  const data = {
+    format: BACKUP_FORMAT, version: 1, app: APP_VERSION, made: new Date().toISOString(),
+    annotations: await store.getAll('annotations'),
+    notes: await store.getAll('notes'),
+    kv: Object.fromEntries(BACKUP_KV.map((k) => [k, S.kv[k]])),
+  };
+  const d = new Date();
+  const name = `chartviewer-backup-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
+  const file = new File([JSON.stringify(data)], name, { type: 'application/json' });
+  try {
+    if (navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ files: [file], title: 'Chart Viewer backup' });
+    } else {
+      const url = URL.createObjectURL(file);
+      const a = document.createElement('a');
+      a.href = url; a.download = name; document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }
+    setKv('lastBackup', Date.now());
+    toast('Choose Save to Files to keep the backup');
+    if (location.hash === '#/settings') route();
+  } catch (e) {
+    if (e?.name !== 'AbortError') dialog({ title: 'Backup failed', html: `<p>${esc(e.message || e)}</p>` });
+  }
+}
+
+function pickBackup() {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.json,application/json';
+  inp.style.display = 'none';
+  inp.addEventListener('change', async () => {
+    const f = inp.files[0]; inp.remove();
+    if (!f) return;
+    try { await restoreBackup(JSON.parse(await f.text())); } catch (e) { dialog({ title: 'Restore failed', html: `<p>${esc(e.message || e)}</p>` }); }
+  });
+  document.body.append(inp);
+  inp.click();
+}
+
+const isBackup = (o) => o && o.format === BACKUP_FORMAT;
+
+/** Merge a backup in: keeps whichever copy of each note/page was edited last. */
+async function restoreBackup(data) {
+  if (!isBackup(data)) throw new Error('This is not a Chart Viewer backup file.');
+  let ann = 0, notes = 0;
+  for (const r of data.annotations || []) {
+    const cur = await store.get('annotations', r.id);
+    if (!cur || (r.updated || 0) > (cur.updated || 0)) {
+      await store.put('annotations', r);
+      S.ann.set(r.id, { id: r.id, icao: r.icao, key: r.key, cycle: r.cycle, rev: r.rev, n: r.strokes.length });
+      ann++;
+    }
+  }
+  for (const n of data.notes || []) {
+    const cur = S.notes.get(n.id);
+    if (!cur || (n.updated || 0) > (cur.updated || 0)) { await store.put('notes', n); S.notes.set(n.id, n); notes++; }
+  }
+  const kv = data.kv || {};
+  if (Array.isArray(kv.favorites)) {
+    const have = new Set(S.kv.favorites.map((f) => `${f.icao}|${f.key}`));
+    setKv('favorites', [...S.kv.favorites, ...kv.favorites.filter((f) => !have.has(`${f.icao}|${f.key}`))]);
+  }
+  for (const k of BACKUP_KV) if (k !== 'favorites' && kv[k] !== undefined && (S.kv[k] === undefined || JSON.stringify(S.kv[k]) === JSON.stringify(KV_DEFAULTS[k]))) setKv(k, kv[k]);
+  await dialog({ title: 'Backup restored', html: `<p>From ${esc(fmtWhen(Date.parse(data.made)))}.</p><p>${ann} annotated chart page(s) and ${notes} kneeboard page(s) restored. Newer copies already on this iPad were kept.</p>` });
+  applyTheme();
   route();
 }
 
@@ -769,7 +949,47 @@ const actions = {
     toast('Old notes deleted');
   },
   // viewer
-  'v-back': () => { const c = S.cur; go(c ? `#/a/${encodeURIComponent(c.icao)}/${c.tab}` : '#/'); },
+  'v-back': () => {
+    const c = S.cur;
+    if (c?.kind === 'note') go(S.noteReturn || '#/notes');
+    else go(c ? `#/a/${encodeURIComponent(c.icao)}/${c.tab}` : '#/');
+    S.noteReturn = null;
+  },
+  kneeboard: () => {
+    // From a chart: remember it, so ‹ on the note page comes straight back.
+    S.noteReturn = S.view === 'viewer' && S.viewerMode === 'chart' ? location.hash : null;
+    const last = S.kv.lastNote && S.notes.get(S.kv.lastNote);
+    go(last ? `#/n/${last.id}` : '#/notes');
+  },
+  'note-new': (t) => newNote(t.dataset.tpl),
+  'note-new-same': async () => {
+    if (S.cur?.kind !== 'note') return;
+    const tid = await dialog({ title: 'New page', buttons: [...TEMPLATES.map((t) => ({ label: `${t.icon} ${t.name}`, value: t.id })), { label: 'Cancel', value: null }] });
+    if (tid) newNote(tid, true);
+  },
+  'note-rename': async () => {
+    const c = S.cur; if (c?.kind !== 'note') return;
+    const ok = await dialog({
+      title: 'Page name',
+      html: `<label class="field"><input id="note-title" value="${esc(c.n.title)}" style="text-transform:none"></label>`,
+      buttons: [{ label: 'Cancel', value: false }, { label: 'Save', value: true, cls: 'primary' }],
+    });
+    if (!ok) return;
+    c.n.title = (dialogFields['note-title'] || '').trim() || c.n.title;
+    c.n.updated = Date.now();
+    await store.put('notes', c.n);
+    route();
+  },
+  'note-del': async (t) => {
+    const n = S.notes.get(t.dataset.id); if (!n) return;
+    const ok = await dialog({ title: 'Delete this page?', html: `<p>${esc(n.title)}</p><p>This cannot be undone (unless you have a backup).</p>`, buttons: [{ label: 'Cancel', value: false }, { label: 'Delete', value: true, cls: 'danger' }] });
+    if (!ok) return;
+    await store.del('notes', n.id);
+    S.notes.delete(n.id);
+    route();
+  },
+  backup: () => saveBackup(),
+  restore: () => pickBackup(),
   'v-fav': () => {
     const c = S.cur; if (!c) return;
     const on = toggleFav(c.icao, c.key);
@@ -892,6 +1112,8 @@ function route() {
     if (parts[0] === 'a' && parts[1]) renderAirport(parts[1], parts[2]);
     else if (parts[0] === 'c' && parts[3]) renderViewer(parts[1], parts[2], parts[3], parts[4]);
     else if (parts[0] === 'settings') renderSettings();
+    else if (parts[0] === 'notes') renderNotes();
+    else if (parts[0] === 'n' && parts[1]) renderNote(parts[1]);
     else renderHome();
   } catch (e) {
     console.error(e);

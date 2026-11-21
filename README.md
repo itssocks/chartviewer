@@ -142,6 +142,12 @@ If step 4 fails, open the app once online, wait for "Ready for offline use", and
 - **Apple Pencil**: draws only with the Pencil; fingers always pan and zoom. Red / blue /
   black pen, thin/thick, highlighter, eraser, Undo, Clear. **Off** stops the Pencil drawing.
   Notes are saved per airport + chart number + cycle and never change the PDF.
+- **Kneeboard (📝)**: digital paper. Pick a template for a new page (blank, lined, grid,
+  IFR clearance + ATIS, Panama VFR (MPMG), time & fuel log) and write with the Pencil. Pages save
+  as you write and stay until you delete them. From a chart, 📝 opens your last page and ‹ goes
+  straight back to the chart. ＋ adds a page; tap a page name to rename it.
+- **Backup (optional)**: ⚙︎ → **Save backup…** makes one small file with your chart notes,
+  kneeboard pages, favorites and settings (Save to Files → On My iPad). **Restore backup…** brings it back.
 - ⚙︎ **Menus: Auto / Day / Night** for the app's own screens.
 
 ## Privacy
@@ -158,6 +164,7 @@ If step 4 fails, open the app once online, wait for "Ready for offline use", and
 | `index.html`, `css/app.css` | The page and its look |
 | `js/app.js` | Screens, search, import, favorites, flight tabs |
 | `js/viewer.js` | Chart display, zoom, rotation, Pencil drawing |
+| `js/notepad.js` | Kneeboard page templates |
 | `js/pdfindex.js` | Reads bookmarks / metadata from the PDFs |
 | `js/store.js`, `js/opfs-worker.js` | On-device storage |
 | `sw.js` | Offline copy of the app (raise `VERSION` after any change) |

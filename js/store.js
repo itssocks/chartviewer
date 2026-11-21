@@ -4,7 +4,7 @@
 //  - Airport list, annotations, favorites, settings: IndexedDB.
 
 const DB_NAME = 'chartviewer';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // 2: added "notes" (kneeboard pages)
 let dbPromise = null;
 
 function openDb() {
@@ -17,6 +17,7 @@ function openDb() {
         if (!d.objectStoreNames.contains('annotations')) d.createObjectStore('annotations', { keyPath: 'id' });
         if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
         if (!d.objectStoreNames.contains('blobs')) d.createObjectStore('blobs');
+        if (!d.objectStoreNames.contains('notes')) d.createObjectStore('notes', { keyPath: 'id' });
       };
       r.onsuccess = () => resolve(r.result);
       r.onerror = () => reject(r.error);
