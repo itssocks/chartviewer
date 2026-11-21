@@ -2,6 +2,8 @@
 *.pdf
 *.PDF
 _charts_index.json
+_map_data.zip
+*.zip
 *.part
 
 # Windows / editor clutter

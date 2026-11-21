@@ -50,22 +50,22 @@ export async function del(store, key) {
   return done(t);
 }
 
-// ------------------------------------------------------------- PDFs (OPFS)
+// ------------------------------------------------------------- files (OPFS)
 
 const opfsAvailable = !!(navigator.storage && navigator.storage.getDirectory);
 
-async function chartsDir() {
+async function chartsDir(folder = 'charts') {
   const root = await navigator.storage.getDirectory();
-  return root.getDirectoryHandle('charts', { create: true });
+  return root.getDirectoryHandle(folder, { create: true });
 }
 
-function writeViaWorker(name, buf) {
+function writeViaWorker(name, buf, folder = 'charts') {
   // Older Safari has no createWritable(); a worker can use createSyncAccessHandle().
   return new Promise((resolve, reject) => {
     const w = new Worker(new URL('./opfs-worker.js', import.meta.url));
     w.onmessage = (e) => { w.terminate(); e.data.ok ? resolve() : reject(new Error(e.data.error)); };
     w.onerror = (e) => { w.terminate(); reject(new Error(e.message || 'worker error')); };
-    w.postMessage({ name, buf }, [buf]);
+    w.postMessage({ name, buf, folder }, [buf]);
   });
 }
 
@@ -147,4 +147,57 @@ export async function storageInfo() {
 
 export async function askPersist() {
   try { return navigator.storage?.persist ? await navigator.storage.persist() : false; } catch { return false; }
+}
+
+// ------------------------------------------------------------- map data (OPFS folder "map")
+// One file (_map_data.zip from the export script). Saved like the charts, but in
+// its own folder so the chart clean-up never touches it.
+
+/** Save the map file. Returns 'opfs' or 'idb'. */
+export async function saveMapFile(name, buf) {
+  if (opfsAvailable) {
+    try {
+      const dir = await chartsDir('map');
+      const fh = await dir.getFileHandle(name, { create: true });
+      if (fh.createWritable) {
+        const w = await fh.createWritable();
+        await w.write(buf);
+        await w.close();
+      } else {
+        await writeViaWorker(name, buf.slice(0), 'map');
+      }
+      if ((await fh.getFile()).size === buf.byteLength) return 'opfs';
+      throw new Error('size check failed');
+    } catch (e) {
+      console.warn('OPFS write failed, using IndexedDB instead', e);
+      try { (await chartsDir('map')).removeEntry(name); } catch { /* ignore */ }
+    }
+  }
+  await put('blobs', new Blob([buf], { type: 'application/zip' }), 'map:' + name);
+  return 'idb';
+}
+
+/** The stored map file as a Blob/File (read in pieces, never all at once), or null. */
+export async function mapFile(name, where) {
+  try {
+    if (where === 'idb') return (await get('blobs', 'map:' + name)) || null;
+    return await (await (await chartsDir('map')).getFileHandle(name)).getFile();
+  } catch { return null; }
+}
+
+/** Remove map files other than `keep`. */
+export async function cleanMapFiles(keep) {
+  try {
+    if (opfsAvailable) {
+      const dir = await chartsDir('map');
+      for await (const [name] of dir.entries()) if (name !== keep) await dir.removeEntry(name);
+    }
+  } catch (e) { console.warn('map cleanup skipped', e); }
+}
+
+export async function deleteMapFile(name, where) {
+  try {
+    if (where === 'idb') await del('blobs', 'map:' + name);
+    else await (await chartsDir('map')).removeEntry(name);
+  } catch (e) { console.warn('delete failed', name, e); }
 }

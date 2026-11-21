@@ -1,9 +1,9 @@
 // Offline support: keeps a copy of the app's own files on the device.
-// Chart PDFs are NOT handled here - they live in the device's private storage.
+// Chart PDFs and the map data are NOT handled here - they live in the device's private storage.
 //
 // IMPORTANT: when you change any app file, change VERSION below too,
 // so iPads pick up the new version (they'll show "App update ready").
-const VERSION = '1.4.2';
+const VERSION = '1.5.0';
 const CACHE = `chartviewer-${VERSION}`;
 const ASSETS = [
   './',
@@ -17,6 +17,8 @@ const ASSETS = [
   'js/notepad.js',
   'js/gps.js',
   'js/georef.js',
+  'js/map.js',
+  'js/mapdata.js',
   'js/opfs-worker.js',
   'vendor/pdfjs/pdf.min.mjs',
   'vendor/pdfjs/pdf.worker.min.mjs',

@@ -115,14 +115,14 @@ On the PC:
    ```powershell
    py jepp_export.py --replace
    ```
-   This puts the PDFs **and** `_charts_index.json` in `Jeppesen\Current charts`
+   This puts the PDFs, `_charts_index.json` **and** `_map_data.zip` (moving map) in `Jeppesen\Current charts`
    (old ones are moved to `_Old charts`, never deleted). That folder holds only charts.
 4. ☐ Copy everything in **Current charts** (select all) to the folder the iPad uses
    (OneDrive), replacing the old ones. Wait for OneDrive to finish syncing.
 
 On the iPad:
 
-5. ☐ Open **Charts** → ⚙︎ → **Import charts…** → select all PDFs + `_charts_index.json` → **Open**.
+5. ☐ Open **Charts** → ⚙︎ → **Import charts…** → select all (PDFs + `_charts_index.json` + `_map_data.zip`) → **Open**.
 6. ☐ Read the summary: every airport should be listed, with the new cycle number in green.
    If it offers **Bring notes over**, that's for charts you drew on that did **not** change;
    notes on changed charts stay hidden with the old cycle.
@@ -184,14 +184,34 @@ If step 4 fails, open the app once online, wait for "Ready for offline use", and
   blend in between; if they disagree by more than 100 degrees the compass wins. The status line shows
   accuracy, ground speed and heading, or why there's no position ("outside this chart", "not available
   on this chart"). Tap ➤ again to hide it. iOS asks once for location and once for the compass.
+- **Moving map (🗺)**: from the top bar of any screen, or 🗺 on a chart. Works fully offline
+  from `_map_data.zip` (import it like the charts; `py jepp_export.py --map` makes a fresh one).
+  - ➤ shows your position (same plane, heading logic and switch as on the charts). Hidden when the
+    GPS is weak (worse than ±1000 m) or has gone quiet for 15 s; grey when worse than ±100 m.
+  - ⌖ **Follow** keeps you centred (dragging the map turns it off). **N↑ / TRK↑** switches north up /
+    track up (track up puts you low on the screen to see ahead). Pinch or ＋/－ to zoom, double-tap
+    to zoom in, two-finger tap to zoom out.
+  - Top-left strip: ground speed, GPS track (°T) and GPS altitude (geometric, not baro; shown only
+    when the iPad says it's within ±50 m).
+  - **Tap an airport**: name, elevation, runways, METAR if saved, distance/bearing from you, and its
+    charts by tab if they're on this iPad (‹ on the chart comes back to the map). If not, it tells you
+    the `--airports` code to add to the export. **Tap a VOR/NDB**: frequency, position, distance/bearing.
+    **Tap anywhere else**: coordinates, distance/bearing, and any airspace there. A magenta line joins
+    you to what you tapped.
+  - 📍 **Nearest** airports (runway ≥ 1,500 ft) with distance/bearing, plus a search box.
+    ☰ **Layers**. ☾ night colours, ☀︎ dims.
+  - Data: Natural Earth (land, water, borders, towns, roads), OurAirports (airports, runways,
+    navaids - community data, check the chart), openAIP airspace / VFR reporting points if you added
+    them on the PC. Bearings are **true** (°T). No airways (there's no free source for them).
 - ⚙︎ **Menus: Auto / Day / Night** for the app's own screens.
 
 ## Privacy
 
 - Hosted online: only the files in this folder (app code + pdf.js). `.gitignore` blocks
   `*.pdf` and `_charts_index.json` from ever being committed.
-- The app makes no network requests except loading its own files. Charts, notes,
-  favorites and settings stay in the iPad's private storage for this app.
+- The app makes no network requests except loading its own files (and weather, if you set up
+  the relay). Charts, the map data, notes, favorites and settings stay in the iPad's private
+  storage for this app. `.gitignore` also blocks `*.zip` (map data).
 
 ## Files
 
@@ -203,6 +223,8 @@ If step 4 fails, open the app once online, wait for "Ready for offline use", and
 | `js/notepad.js` | Kneeboard page templates |
 | `js/gps.js` | GPS position and heading (compass / track blend) |
 | `js/georef.js` | Places GPS positions on charts from their lat/lon labels |
+| `js/map.js` | Moving map drawing, touch, own-ship |
+| `js/mapdata.js` | Reads `_map_data.zip` piece by piece from storage |
 | `js/pdfindex.js` | Reads bookmarks / metadata from the PDFs |
 | `js/store.js`, `js/opfs-worker.js` | On-device storage |
 | `sw.js` | Offline copy of the app (raise `VERSION` after any change) |

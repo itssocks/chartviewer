@@ -1,10 +1,10 @@
 // Writes a file into the Origin Private File System (for Safari versions
 // without FileSystemFileHandle.createWritable()).
 self.onmessage = async (e) => {
-  const { name, buf } = e.data;
+  const { name, buf, folder } = e.data;
   try {
     const root = await navigator.storage.getDirectory();
-    const dir = await root.getDirectoryHandle('charts', { create: true });
+    const dir = await root.getDirectoryHandle(folder || 'charts', { create: true });
     const fh = await dir.getFileHandle(name, { create: true });
     const h = await fh.createSyncAccessHandle();
     h.truncate(0);

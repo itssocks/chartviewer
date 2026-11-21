@@ -7,8 +7,10 @@ import { ChartViewer } from './viewer.js';
 import { TEMPLATES, templateById, makeNotePage } from './notepad.js';
 import { Gps, parseMagvar } from './gps.js';
 import { georefFromText, linesFromOps, toChart } from './georef.js';
+import { MapData, distBrg } from './mapdata.js';
+import { MovingMap, PALETTES } from './map.js';
 
-export const APP_VERSION = '1.4.2';
+export const APP_VERSION = '1.5.0';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -28,6 +30,7 @@ const KV_DEFAULTS = {
   theme: 'auto', chartNight: false, dim: 1,
   tool: { kind: 'pen', color: 'red', width: 'thin' },
   last: {}, index: null, rotation: {}, rwy: {}, wx: {}, wxRelay: '', gps: false, compassOffset: 0, lastNote: '', lastBackup: 0,
+  mapFile: null, mapView: null, mapLayers: null, mapNight: null,
 };
 
 const S = { airports: new Map(), kv: {}, ann: new Map(), view: null, missing: new Set(), notes: new Map() };
@@ -246,6 +249,7 @@ function topBar({ back, title, sub = '', right = '' }) {
     ${back ? `<button class="iconbtn" data-act="nav" data-to="${back}" aria-label="Back">‹</button>` : '<span class="logo">✈︎</span>'}
     <div class="top-title"><h1>${title}</h1>${sub ? `<div class="sub">${sub}</div>` : ''}</div>
     ${right}
+    <button class="iconbtn" data-act="nav" data-to="#/map" aria-label="Moving map">🗺</button>
     <button class="iconbtn" data-act="kneeboard" aria-label="Kneeboard">📝</button>
     <button class="iconbtn" data-act="nav" data-to="#/settings" aria-label="Settings and import">⚙︎</button>
   </header>`;
@@ -573,12 +577,13 @@ async function setWake(on) {
   } catch (e) { console.warn('wake lock', e); }
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && S.view === 'viewer') setWake(true);
+  if (document.visibilityState === 'visible' && (S.view === 'viewer' || S.view === 'map')) setWake(true);
   if (document.visibilityState === 'hidden') flushSave();
-  gpsRun(document.visibilityState === 'visible' && S.view === 'viewer' && S.viewerMode === 'chart');
+  gpsRun(gpsWanted());
 });
 
 function leaveViewer() {
+  if (S.view === 'map') leaveMap();
   if (S.view !== 'viewer') { S.view = 'other'; return; }
   flushSave();
   viewer?.destroy();
@@ -605,6 +610,7 @@ function viewerShell(mode = 'chart') {
   S.viewerMode = mode;
   const chartBtns = `
       <button class="iconbtn gpsbtn ${S.kv.gps ? 'on' : ''}" data-act="gps" id="vgps" aria-label="Show my GPS position">➤</button>
+      <button class="iconbtn" data-act="v-map" aria-label="Moving map">🗺</button>
       <button class="iconbtn" data-act="kneeboard" aria-label="Kneeboard">📝</button>
       <button class="iconbtn" data-act="v-fav" id="vfav" aria-label="Favorite">☆</button>
       <button class="iconbtn" data-act="v-rotate" aria-label="Rotate">⟳</button>`;
@@ -734,7 +740,7 @@ async function renderViewer(icao, tab, key, pidx) {
 // Situational awareness only. The icon only appears on charts whose plan view
 // passed the georeference checks (see georef.js), inside that plan view.
 
-const gps = new Gps(() => updateOwn());
+const gps = new Gps(() => { if (S.view === 'map') updateMapOwn(); else updateOwn(); });
 const geoCache = new Map(); // "file#page" -> Promise<georef result>
 
 function chartGeo(cur) {
@@ -755,13 +761,6 @@ function chartGeo(cur) {
   return p.then((g) => { cur.geo = g; return g; });
 }
 
-const R = 6371008.8;
-function distBrg(lat1, lon1, lat2, lon2) {
-  const r = Math.PI / 180, p1 = lat1 * r, p2 = lat2 * r, dl = (lon2 - lon1) * r;
-  const d = 2 * R * Math.asin(Math.sqrt(Math.sin((p2 - p1) / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2));
-  const b = Math.atan2(Math.sin(dl) * Math.cos(p2), Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl)) / r;
-  return [d / 1852, (b + 360) % 360];
-}
 const deg3 = (v) => String(Math.round(v) % 360 || 360).padStart(3, '0');
 
 function gpsStatus(text, cls = '') {
@@ -812,6 +811,7 @@ function gpsRun(on) {
   if (on && S.kv.gps && document.visibilityState === 'visible') gps.start();
   else gps.stop();
 }
+const gpsWanted = () => document.visibilityState === 'visible' && ((S.view === 'viewer' && S.viewerMode === 'chart') || S.view === 'map');
 
 function ensureViewer(mode) {
   if (S.view === 'viewer' && viewer && S.viewerMode === mode) { flushSave(); return; }
@@ -943,6 +943,388 @@ function stepChart(dir) {
   go(chartHash(cur.icao, cur.tab, nx[0].key, nx[1]), true);
 }
 
+// ================================================================ moving map
+// Offline map from _map_data.zip (OurAirports, Natural Earth, openAIP). The plane
+// uses the same GPS / heading logic as on the charts. Situational awareness only:
+// the position is hidden when the GPS is weak or stale.
+
+let mmap = null;          // MovingMap while the map screen is open
+let mapTimer = null;
+const mapCache = { data: null, promise: null, file: null };
+
+function mapDataInfo() { return S.kv.mapFile || null; }
+
+function loadMapData() {
+  const info = mapDataInfo();
+  if (!info) return Promise.resolve(null);
+  if (mapCache.file === info.name && (mapCache.data || mapCache.promise)) return mapCache.data ? Promise.resolve(mapCache.data) : mapCache.promise;
+  mapCache.file = info.name;
+  mapCache.data = null;
+  mapCache.promise = (async () => {
+    const blob = await store.mapFile(info.name, info.where);
+    if (!blob) throw new Error('The map file is missing on this iPad — import _map_data.zip again');
+    const d = await MapData.open(blob);
+    mapCache.data = d;
+    return d;
+  })();
+  mapCache.promise.catch(() => { mapCache.promise = null; mapCache.file = null; });
+  return mapCache.promise;
+}
+
+const chartCodes = () => new Set(S.airports.keys());
+const mapNight = () => (S.kv.mapNight == null ? document.documentElement.dataset.theme === 'dark' : S.kv.mapNight);
+const fmtNm = (d) => (d < 10 ? d.toFixed(1) : Math.round(d).toLocaleString('en-US'));
+const fmtFt = (v) => (v == null || v === '' ? '' : `${Math.round(v).toLocaleString('en-US')} ft`);
+const SURF = { ASP: 'Asphalt', ASPH: 'Asphalt', CON: 'Concrete', CONC: 'Concrete', GRS: 'Grass', GRASS: 'Grass', GRE: 'Gravel', GRVL: 'Gravel', GVL: 'Gravel', TURF: 'Turf', DIRT: 'Dirt', WATER: 'Water', 'ASP-CON': 'Asphalt/concrete' };
+const RANKNAME = { 1: 'Large airport', 2: 'Medium airport', 3: 'Small airport', 4: 'Seaplane base', 5: 'Heliport' };
+const latLonText = (lat, lon) => `${fmtLatLon(lat, 'N', 'S', 2)} ${fmtLatLon(lon, 'E', 'W', 3)}`;
+
+/** The GPS fix if it's good enough to show (else null + reason). */
+function usableFix() {
+  if (!S.kv.gps) return [null, 'GPS off — tap ➤ to show your position'];
+  const f = gps.fix;
+  if (!f) return [null, gps.error || 'Waiting for GPS…'];
+  const age = (Date.now() - f.time) / 1000;
+  if (age > 15) return [null, `GPS signal lost (last position ${Math.round(age)} s ago)`];
+  if (f.acc > 1000) return [null, `GPS signal too weak (±${Math.round(f.acc)} m)`];
+  return [f, ''];
+}
+
+/** "12.3 nm · 045°T" from the GPS position to lat/lon, or ''. */
+function fromMe(lat, lon) {
+  const [f] = usableFix();
+  if (!f) return '';
+  const [d, b] = distBrg(f.lat, f.lon, lat, lon);
+  return `${fmtNm(d)} nm · ${deg3(b)}°T`;
+}
+
+function renderMap() {
+  leaveViewer();
+  S.view = 'map';
+  const info = mapDataInfo();
+  app.innerHTML = `
+  <div class="mapview ${mapNight() ? 'map-night' : ''}">
+    <header class="vbar mbar">
+      <button class="iconbtn" data-act="map-back" aria-label="Back">‹</button>
+      <div class="vtitle"><b>Map</b><div class="sub" id="mapsub">${info ? `Map data ${fmtDate(info.made)}` : 'No map data'}</div></div>
+      <button class="iconbtn gpsbtn ${S.kv.gps ? 'on' : ''}" data-act="gps" id="mgps" aria-label="Show my GPS position">➤</button>
+      <button class="iconbtn txtbtn" data-act="map-follow" id="mfollow" aria-label="Follow my position">⌖</button>
+      <button class="iconbtn txtbtn" data-act="map-orient" id="morient" aria-label="North up or track up">N↑</button>
+      <button class="iconbtn" data-act="map-nearest" aria-label="Nearest airports and search">📍</button>
+      <button class="iconbtn" data-act="map-layers" aria-label="Layers">☰</button>
+      <button class="iconbtn" data-act="kneeboard" aria-label="Kneeboard">📝</button>
+      <button class="iconbtn ${mapNight() ? 'on' : ''}" data-act="map-night" id="mnight" aria-label="Night colours">☾</button>
+      <label class="dimctl" aria-label="Brightness">☀︎<input type="range" id="mdim" min="0.25" max="1" step="0.05" value="${S.kv.dim}"></label>
+    </header>
+    <div class="map-stage" id="mapstage">
+      <div class="map-strip" id="mapstrip"></div>
+      <div class="map-zoom"><button data-act="map-zoom" data-f="2" aria-label="Zoom in">＋</button><button data-act="map-zoom" data-f="0.5" aria-label="Zoom out">－</button></div>
+      <div class="vgps" id="mapgps"></div>
+      <div class="map-panel" id="mappanel" hidden></div>
+      <div class="map-credit">Natural Earth · OurAirports<span id="mcred"></span></div>
+      <div class="vdim" id="mdimlayer"></div>
+      <div class="vloading" id="mloading">${info ? 'Loading map…' : ''}</div>
+    </div>
+  </div>`;
+  const dim = document.getElementById('mdim');
+  const applyMapDim = () => { document.getElementById('mdimlayer').style.opacity = String(1 - S.kv.dim); };
+  dim.addEventListener('input', () => { S.kv.dim = +dim.value; applyMapDim(); });
+  dim.addEventListener('change', () => setKv('dim', +dim.value));
+  applyMapDim();
+  setWake(true);
+  gpsRun(true);
+  if (!info) {
+    const l = document.getElementById('mloading');
+    l.innerHTML = `<div class="map-empty"><h2>No map data yet</h2>
+      <p>On the PC run <b>py jepp_export.py --map</b> (or a normal export). It puts <b>_map_data.zip</b> in your <i>Current charts</i> folder.</p>
+      <p>Then tap <b>Import</b> and choose <i>_map_data.zip</i> (you can select it together with the PDFs).</p>
+      <button class="btn primary" data-act="import">Import…</button></div>`;
+    l.style.display = 'block';
+    return;
+  }
+  loadMapData().then((d) => {
+    if (S.view !== 'map' || !document.getElementById('mapstage')) return;
+    document.getElementById('mloading').style.display = 'none';
+    startMap(d);
+  }).catch((e) => {
+    console.error(e);
+    const l = document.getElementById('mloading');
+    if (l) l.textContent = `Could not open the map data: ${e.message || e}`;
+  });
+}
+
+function startMap(d) {
+  const stage = document.getElementById('mapstage');
+  const v = S.kv.mapView || {};
+  mmap = new MovingMap(stage, {
+    data: d,
+    chartCodes: chartCodes(),
+    onTap: (f) => selectOnMap(f),
+    onUserMove: () => updateMapButtons(),
+  });
+  mmap.palette = PALETTES[mapNight() ? 'night' : 'day'];
+  mmap.layers = { ...mmap.layers, ...(S.kv.mapLayers || {}) };
+  mmap.trackUp = !!v.trackUp;
+  mmap.follow = v.follow !== false;
+  if (d.meta.openaip?.length) document.getElementById('mcred').textContent = ' · openAIP (CC BY-NC)';
+  // start where we were, or at the flight's departure airport, or Panama
+  const dep = S.airports.get(S.kv.flight.dep);
+  const start = v.lat != null ? v : dep?.info?.lat != null ? { lat: dep.info.lat, lon: dep.info.lon } : { lat: 8.97, lon: -79.55 };
+  mmap.setCenter(start.lat, start.lon);
+  mmap.setSpan(v.span || 60);
+  const age = (Date.now() - Date.parse(d.meta.made)) / 864e5;
+  if (age > 90) document.getElementById('mapsub').innerHTML = `<span class="pill amber">Map data ${Math.round(age)} days old</span>`;
+  clearInterval(mapTimer);
+  mapTimer = setInterval(updateMapOwn, 2000); // notices a GPS that has gone quiet
+  updateMapOwn();
+  updateMapButtons();
+}
+
+function leaveMap() {
+  clearInterval(mapTimer);
+  mapTimer = null;
+  if (mmap) {
+    const c = mmap.centre();
+    setKv('mapView', { lat: c.lat, lon: c.lon, span: mmap.spanNm, trackUp: mmap.trackUp, follow: mmap.follow });
+    mmap.destroy();
+    mmap = null;
+  }
+  S.mapSel = null;
+  setWake(false);
+  gpsRun(false);
+}
+
+function updateMapButtons() {
+  if (!mmap) return;
+  document.getElementById('mfollow')?.classList.toggle('on', mmap.follow);
+  const o = document.getElementById('morient');
+  if (o) { o.textContent = mmap.trackUp ? 'TRK↑' : 'N↑'; o.classList.toggle('on', mmap.trackUp); }
+}
+
+/** Nearest magnetic variation we trust: an imported airport's (Jeppesen) within 100 nm, else a navaid's within 150 nm. */
+function magvarNear(lat, lon) {
+  let best = null, bd = 100;
+  for (const a of S.airports.values()) {
+    const i = a.info;
+    if (i?.lat == null || !i.magvar) continue;
+    const [dd] = distBrg(lat, lon, i.lat, i.lon);
+    if (dd < bd) { bd = dd; best = parseMagvar(i.magvar); }
+  }
+  if (best != null) return best;
+  const d = mapCache.data;
+  if (!d) return 0;
+  bd = 150;
+  for (const n of d.navaids) {
+    if (n.magvar == null || Math.abs(n.lat - lat) > 3 || Math.abs(n.lon - lon) > 3) continue;
+    const [dd] = distBrg(lat, lon, n.lat, n.lon);
+    if (dd < bd) { bd = dd; best = n.magvar; }
+  }
+  return best ?? 0;
+}
+
+function updateMapOwn() {
+  if (!mmap || S.view !== 'map') return;
+  const [f, why] = usableFix();
+  const bar = document.getElementById('mapgps');
+  const strip = document.getElementById('mapstrip');
+  if (!f) {
+    mmap.own = null;
+    if (mmap.trackUp) mmap.rot = 0;
+    bar.className = `vgps show ${S.kv.gps && gps.fix ? 'warn' : 'muted'}`;
+    bar.innerHTML = `${esc(why)}<small>GPS · situational awareness only</small>`;
+    strip.innerHTML = '';
+    mmap.invalidate();
+    if (S.mapSel) refreshMapPanel(true);
+    return;
+  }
+  // magnetic variation for the compass (only used when slow): refresh every few km
+  if (!S.mvAt || Math.abs(S.mvAt[0] - f.lat) + Math.abs(S.mvAt[1] - f.lon) > 0.05) {
+    S.mvAt = [f.lat, f.lon];
+    gps.magvar = magvarNear(f.lat, f.lon);
+  }
+  gps.compassOffset = S.kv.compassOffset || 0;
+  mmap.own = { lat: f.lat, lon: f.lon, hdg: gps.heading, accM: f.acc, weak: f.acc > 100 };
+  let note = '';
+  if (mmap.trackUp) {
+    if (gps.heading != null) mmap.rot = gps.heading;
+    else { mmap.rot = 0; note = ' · no heading yet: north up'; }
+  } else mmap.rot = 0;
+  const src = gps.headingSource === 'compass' ? ' (compass)' : gps.headingSource === 'blend' ? ' (blend)' : '';
+  bar.className = `vgps show ${f.acc > 100 ? 'warn' : ''}`;
+  bar.innerHTML = `±${Math.round(f.acc)} m${gps.heading != null ? ` · HDG ${deg3(gps.heading)}°T${src}` : ''}${note}<small>GPS · situational awareness only</small>`;
+  const altOk = f.alt != null && f.altAcc != null && f.altAcc <= 50;
+  strip.innerHTML = `
+    <div><small>GS</small><b>${f.speedOk ? Math.round(f.kt) : '—'}</b><i>kt</i></div>
+    <div><small>TRK</small><b>${f.track != null ? deg3(f.track) : '—'}</b><i>°T</i></div>
+    <div><small>GPS ALT</small><b>${altOk ? Math.round(f.alt / 0.3048).toLocaleString('en-US') : '—'}</b><i>ft</i></div>`;
+  mmap.invalidate();
+  if (S.mapSel) refreshMapPanel(true);
+}
+
+// ---------------------------------------------------------------- map panel (tap on the map)
+
+function selectOnMap(f) {
+  S.mapSel = f;
+  S.mapSelTab = null;
+  mmap.target = f.kind === 'point' ? { lat: f.lat, lon: f.lon } : { f };
+  mmap.invalidate();
+  refreshMapPanel();
+}
+
+function closeMapPanel() {
+  S.mapSel = null;
+  if (mmap) { mmap.target = null; mmap.padRight = 0; mmap.padBottom = 0; mmap.invalidate(); }
+  const p = document.getElementById('mappanel');
+  if (p) { p.hidden = true; p.innerHTML = ''; }
+}
+
+/** Re-draw the panel. `light` = only the "from you" line (on GPS updates). */
+function refreshMapPanel(light = false) {
+  const p = document.getElementById('mappanel');
+  const f = S.mapSel;
+  if (!p || !f) return;
+  if (light) {
+    const el = p.querySelector('[data-fromme]');
+    if (el) el.innerHTML = fromMeHtml(f.lat, f.lon);
+    return;
+  }
+  p.hidden = false;
+  let html = '';
+  if (f.kind === 'apt') html = airportPanel(f);
+  else if (f.kind === 'nav') html = navaidPanel(f);
+  else if (f.kind === 'pt') html = `<h3><b>${esc(f.name)}</b>${f.code ? ` <small>${esc(f.code)}</small>` : ''}</h3>
+      <p class="muted">VFR reporting point${f.compulsory ? ' (compulsory)' : ''} · openAIP</p>
+      ${fromMeRow(f.lat, f.lon)}<p>${latLonText(f.lat, f.lon)}</p>`;
+  else if (f.kind === 'nearest') html = nearestPanel();
+  else if (f.kind === 'layers') html = layersPanel();
+  else html = pointPanel(f);
+  p.innerHTML = `<button class="iconbtn small mp-close" data-act="map-close" aria-label="Close">✕</button>${html}`;
+  if (mmap) {
+    const land = matchMedia('(orientation: landscape)').matches;
+    mmap.padRight = land ? p.offsetWidth + 16 : 0;
+    mmap.padBottom = land ? 0 : p.offsetHeight + 16;
+    mmap.invalidate();
+  }
+  if (f.kind === 'nearest') {
+    const inp = document.getElementById('mfind');
+    inp.addEventListener('input', () => { S.mapFind = inp.value; document.getElementById('mfindres').innerHTML = nearestRows(); });
+  }
+}
+
+function fromMeHtml(lat, lon) {
+  if (lat == null) return '';
+  const t = fromMe(lat, lon);
+  return t ? `From you <b>${t}</b>` : '<span class="muted">From you: no GPS position</span>';
+}
+const fromMeRow = (lat, lon) => `<p class="mp-from" data-fromme>${fromMeHtml(lat, lon)}</p>`;
+
+function airportPanel(a) {
+  const ch = S.airports.get(a.icao) || S.airports.get(a.code);
+  const country = mapCache.data?.countries[a.country] || a.country;
+  const elev = ch?.info?.elev ? `${Number(ch.info.elev).toLocaleString('en-US')} ft` : fmtFt(a.elev);
+  const rw = a.rwys.slice().sort((x, y) => (y.len || 0) - (x.len || 0)).map((r) => {
+    const bits = [];
+    if (r.len) bits.push(`${r.len.toLocaleString('en-US')}${r.wid ? ` × ${r.wid}` : ''} ft`);
+    const s = SURF[(r.surf || '').toUpperCase()] || r.surf;
+    if (s) bits.push(esc(s));
+    if (r.lit) bits.push('lit');
+    if (r.le_disp) bits.push(`${esc(r.le)} displ. thr. ${r.le_disp} ft`);
+    if (r.he_disp) bits.push(`${esc(r.he)} displ. thr. ${r.he_disp} ft`);
+    return `<div class="rwyline ${r.closed ? 'closed' : ''}"><b class="rwyid">${esc([r.le, r.he].filter(Boolean).join(' / ') || '?')}</b><span>${r.closed ? 'CLOSED' : bits.join(' · ')}</span></div>`;
+  }).join('');
+  const w = wxOf(a.icao);
+  const m = w?.metar;
+  const wx = m ? `<div class="mp-wx">${catBadge(m.cat)}<span class="wxraw">${esc(m.raw)}</span><small class="wxage">${ageText(m.obs)}</small></div>` : '';
+  let charts;
+  if (ch) {
+    const tab = S.mapSelTab;
+    charts = `<div class="mp-sec">Charts on this iPad ${cycleBadge(ch)}</div>
+      <div class="mp-tabs">${TABS.map((t) => { const n = chartsInTab(ch, t.id).length; return `<button class="tab ${t.id === tab ? 'on' : ''} ${n ? '' : 'none'}" data-act="map-tab" data-tab="${t.id}" ${n ? '' : 'disabled'}>${t.label}<small>${n}</small></button>`; }).join('')}</div>
+      ${tab ? `<div class="list mp-charts">${chartsInTab(ch, tab).map((c) => `<button class="row mp-chart" data-act="map-chart" data-icao="${esc(ch.icao)}" data-key="${esc(c.key)}" data-tab="${tab}"><span class="num">${esc(c.number || '—')}</span><span class="ttl">${esc(c.title)}</span></button>`).join('')}</div>` : ''}
+      <button class="btn" data-act="map-airport" data-icao="${esc(ch.icao)}">Open ${esc(ch.icao)} airport page</button>`;
+  } else {
+    const code = a.icao || a.code;
+    charts = `<div class="mp-nocharts">No charts on this iPad for <b>${esc(code)}</b>${a.icao ? ` — add it to the export with <code>--airports ${esc(a.icao)}</code>` : ' (no ICAO code, so probably no Jeppesen charts)'}.</div>`;
+  }
+  return `<h3><b>${esc(a.code)}</b>${a.iata ? ` <small>${esc(a.iata)}</small>` : ''} ${esc(a.name)}</h3>
+    <p class="muted">${esc([a.city, country].filter(Boolean).join(', '))} · ${RANKNAME[a.rank] || ''}${elev ? ` · Elev ${elev}` : ''}</p>
+    ${fromMeRow(a.lat, a.lon)}
+    ${wx}
+    ${rw ? `<div class="rwys">${rw}</div>` : '<p class="muted">No runway information.</p>'}
+    ${charts}
+    <p class="mp-foot">${latLonText(a.lat, a.lon)} · OurAirports data — check the chart.</p>`;
+}
+
+function navFreq(n) {
+  if (/TACAN/.test(n.type) && !/VORTAC/.test(n.type)) return n.dme_ch ? `Channel ${esc(n.dme_ch)} (military TACAN)` : 'Military TACAN';
+  if (!n.khz) return '';
+  if (/NDB/.test(n.type)) return `${n.khz} kHz`;
+  const mhz = (n.khz / 1000).toFixed(2);
+  return n.type === 'DME' ? `DME, paired with ${mhz} MHz${n.dme_ch ? ` · ch ${esc(n.dme_ch)}` : ''}` : `${mhz} MHz${n.dme_ch ? ` · DME ch ${esc(n.dme_ch)}` : ''}`;
+}
+
+function navaidPanel(n) {
+  return `<h3><b>${esc(n.ident)}</b> ${esc(n.name)} <small>${esc(n.type)}</small></h3>
+    <p class="mp-freq">${navFreq(n) || '<span class="muted">No frequency in the data</span>'}</p>
+    ${fromMeRow(n.lat, n.lon)}
+    <p>${latLonText(n.lat, n.lon)}${n.elev != null ? ` · Elev ${fmtFt(n.elev)}` : ''}</p>
+    <p class="mp-foot">OurAirports community data — always check frequencies on the chart.</p>`;
+}
+
+function pointPanel(f) {
+  const asp = mapCache.data ? mapCache.data.airspaceAt(f.lat, f.lon) : [];
+  return `<h3>${latLonText(f.lat, f.lon)}</h3>
+    ${fromMeRow(f.lat, f.lon)}
+    ${asp.length ? `<div class="mp-sec">Airspace here</div>${asp.slice(0, 6).map((a) => `<div class="rwyline"><b class="rwyid">${esc(a.cls)}</b><span>${esc(a.name)}<br><small>${esc(a.lo || '?')} – ${esc(a.hi || '?')}</small></span></div>`).join('')}`
+      : `<p class="muted">${mapCache.data?.airspace.length ? 'No airspace in the map data here.' : 'No airspace data imported (see HOW TO RUN → openAIP).'}</p>`}`;
+}
+
+function nearestRows() {
+  const d = mapCache.data;
+  if (!d || !mmap) return '';
+  const q = (S.mapFind || '').trim().toUpperCase();
+  const [f] = usableFix();
+  const from = f ? { lat: f.lat, lon: f.lon } : mmap.centre();
+  const codes = chartCodes();
+  let list;
+  if (q) {
+    list = [];
+    for (const a of d.airports) {
+      if (a.code === q || a.icao === q || a.iata === q) list.unshift(a);
+      else if (q.length >= 3 && (a.code.startsWith(q) || a.name.toUpperCase().includes(q) || (a.city || '').toUpperCase().includes(q))) list.push(a);
+      if (list.length > 60) break;
+    }
+    list = list.slice(0, 25);
+  } else {
+    list = d.airports.filter((a) => (a.rank <= 3 || codes.has(a.icao)) && Math.abs(a.lat - from.lat) < 4 && Math.abs(a.lon - from.lon) < 4 && (a.maxLen || 0) >= 1500)
+      .map((a) => [distBrg(from.lat, from.lon, a.lat, a.lon), a]).sort((x, y) => x[0][0] - y[0][0]).slice(0, 15).map((x) => x[1]);
+  }
+  if (!list.length) return `<p class="muted">${q ? 'No airport found.' : 'No airports with a runway of 1,500 ft or more nearby.'}</p>`;
+  return `<div class="list">${list.map((a) => {
+    const [dd, b] = distBrg(from.lat, from.lon, a.lat, a.lon);
+    const has = codes.has(a.icao) || codes.has(a.code);
+    return `<button class="row mp-near" data-act="map-goto" data-i="${a.i}">
+      <span class="apt-code">${esc(a.code)}</span><span class="apt-name">${esc(a.name)}<small>${a.maxLen ? `${a.maxLen.toLocaleString('en-US')} ft` : ''}${has ? ' · <b class="ok">charts ✓</b>' : ''}</small></span>
+      <span class="mp-db"><b>${fmtNm(dd)}</b> nm<br>${deg3(b)}°T</span></button>`;
+  }).join('')}</div>`;
+}
+
+function nearestPanel() {
+  const [f] = usableFix();
+  return `<h3>Nearest airports <small>${f ? 'from you' : 'from the map centre (no GPS)'}</small></h3>
+    <div class="searchbox inline"><input id="mfind" type="search" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" placeholder="Find airport: ICAO, name or city" value="${esc(S.mapFind || '')}"></div>
+    <div id="mfindres">${nearestRows()}</div>`;
+}
+
+const LAYERS = [['apt', 'Airports'], ['rwy', 'Runways to scale'], ['nav', 'VOR / NDB / DME'], ['pt', 'VFR reporting points'], ['asp', 'Airspace'], ['town', 'Towns'], ['road', 'Roads']];
+function layersPanel() {
+  const L = mmap?.layers || {};
+  const d = mapCache.data;
+  const extra = { pt: d && !d.points.length ? ' <small class="muted">(none imported)</small>' : '', asp: d && !d.airspace.length ? ' <small class="muted">(none imported)</small>' : '' };
+  return `<h3>Layers</h3><div class="mp-layers">${LAYERS.map(([k, l]) => `<button class="row ${L[k] ? 'on' : ''}" data-act="map-layer" data-k="${k}"><span class="chk">${L[k] ? '✓' : ''}</span>${l}${extra[k] || ''}</button>`).join('')}</div>
+    <p class="mp-foot">Map data made ${esc(fmtDate(d?.meta.made))}. Sources: ${esc((d?.meta.sources || []).join(', '))}. Bearings are true (°T).</p>`;
+}
+
 // ================================================================ settings / import
 
 async function renderSettings() {
@@ -954,13 +1336,20 @@ async function renderSettings() {
     <main class="scroll pad">
       <section class="card">
         <button class="btn primary big" data-act="import">Import charts…</button>
-        <p class="muted">Choose airport PDFs (and optionally <i>_charts_index.json</i>) from your Charts folder. You can pick many at once. Re-importing an airport replaces it.</p>
+        <p class="muted">Choose airport PDFs (and optionally <i>_charts_index.json</i> and <i>_map_data.zip</i> for the moving map) from your Charts folder. You can pick many at once. Re-importing an airport replaces it.</p>
       </section>
       <section class="card">
         <h3>Charts on this iPad</h3>
         <p>${mc ? `${cycleBadge(mc)}${mc.mixed ? ' <span class="pill amber">airports are on different cycles</span>' : ''}` : 'None imported yet.'}</p>
         <p id="storage" class="muted">Storage: checking…</p>
         <p class="muted">${swOk ? '✓ Ready for offline use.' : '… Offline copy not ready yet — open the app once more while online.'}</p>
+      </section>
+      <section class="card">
+        <h3>Moving map</h3>
+        ${mapDataInfo() ? `<p>Map data made ${esc(fmtDate(mapDataInfo().made))} · ${fmtBytes(mapDataInfo().size)} · imported ${fmtWhen(mapDataInfo().importedAt)}</p>
+          <button class="btn" data-act="nav" data-to="#/map">Open map</button> <button class="btn danger" data-act="del-map">Delete map data</button>`
+          : '<p class="muted">Not imported yet. Import <i>_map_data.zip</i> from your Charts folder (made by the export script).</p>'}
+        <p class="muted">World base map (Natural Earth), airports, runways and navaids (OurAirports), airspace and reporting points (openAIP, if you added them). Situational awareness only.</p>
       </section>
       <section class="card">
         <h3>Weather (METAR / TAF)</h3>
@@ -1016,7 +1405,7 @@ function pickFiles() {
   const inp = document.createElement('input');
   inp.type = 'file';
   inp.multiple = true;
-  inp.accept = '.pdf,application/pdf,.json,application/json';
+  inp.accept = '.pdf,application/pdf,.json,application/json,.zip,application/zip';
   inp.style.display = 'none';
   inp.addEventListener('change', () => { const files = [...inp.files]; inp.remove(); if (files.length) importFiles(files); });
   document.body.append(inp);
@@ -1026,7 +1415,8 @@ function pickFiles() {
 async function importFiles(files) {
   const jsons = files.filter((f) => /\.json$/i.test(f.name));
   const pdfs = files.filter((f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
-  const skipped = files.filter((f) => !jsons.includes(f) && !pdfs.includes(f));
+  const zips = files.filter((f) => /\.zip$/i.test(f.name));
+  const skipped = files.filter((f) => !jsons.includes(f) && !pdfs.includes(f) && !zips.includes(f));
   const prog = document.createElement('div');
   prog.className = 'modal';
   prog.innerHTML = '<div class="sheet"><h2>Importing…</h2><p id="progtxt"></p><div class="bar"><i id="progbar"></i></div></div>';
@@ -1048,6 +1438,27 @@ async function importFiles(files) {
       setKv('index', merged);
       for (const a of S.airports.values()) if (enrichFromIndex(a, merged)) await store.put('airports', a);
     } catch (e) { res.failed.push(`${f.name}: ${e.message || e}`); }
+  }
+
+  let mapMsg = '';
+  for (const f of zips) {
+    say(`Map data: ${f.name}`, 0);
+    try {
+      const buf = await f.arrayBuffer();
+      // check it opens before replacing the map we have
+      const test = await MapData.open(new Blob([buf]));
+      const name = `map_${Date.now()}.zip`;
+      const where = await store.saveMapFile(name, buf);
+      const old = mapDataInfo();
+      if (old && old.where === 'idb') await store.deleteMapFile(old.name, 'idb');
+      await store.cleanMapFiles(where === 'opfs' ? name : '');
+      setKv('mapFile', { name, where, size: f.size, made: test.meta.made, importedAt: Date.now() });
+      mapCache.data = null; mapCache.promise = null; mapCache.file = null;
+      mapMsg = `Moving map data imported (made ${fmtDate(test.meta.made)}, ${fmtBytes(f.size)}, ${test.airports.length.toLocaleString('en-US')} airports${test.airspace.length ? `, ${test.airspace.length} airspaces` : ''}).`;
+    } catch (e) {
+      console.error(e);
+      res.failed.push(`${f.name}: ${e.message || e}`);
+    }
   }
 
   for (let i = 0; i < pdfs.length; i++) {
@@ -1076,10 +1487,11 @@ async function importFiles(files) {
   }
   say('Done', 1);
   prog.remove();
-  if (backups && backups === jsons.length && !pdfs.length && !res.failed.length) { route(); return; }
+  if (backups && backups === jsons.length && !pdfs.length && !zips.length && !res.failed.length) { route(); return; }
   await store.cleanOrphans([...S.airports.values()].filter((a) => a.where !== 'idb').map((a) => a.file));
 
-  let html = `<p><b>${res.ok.length}</b> airport${res.ok.length === 1 ? '' : 's'} imported${res.ok.length ? ': ' + res.ok.map(esc).join(', ') : ''}.</p>`;
+  let html = pdfs.length || !zips.length ? `<p><b>${res.ok.length}</b> airport${res.ok.length === 1 ? '' : 's'} imported${res.ok.length ? ': ' + res.ok.map(esc).join(', ') : ''}.</p>` : '';
+  if (mapMsg) html += `<p>${esc(mapMsg)}</p>`;
   if (jsons.length) html += `<p>Chart index read (${jsons.length} file).</p>`;
   if (res.flagged.length) html += `<p class="warn"><b>Check these:</b><br>${res.flagged.map(esc).join('<br>')}</p>`;
   if (res.older.length) html += `<p class="warn"><b>Older cycle imported:</b><br>${res.older.map(esc).join('<br>')}</p>`;
@@ -1270,13 +1682,14 @@ const actions = {
   // viewer
   'v-back': () => {
     const c = S.cur;
+    if (c?.kind === 'chart' && S.chartReturn) { const r = S.chartReturn; S.chartReturn = null; go(r); return; }
     if (c?.kind === 'note') go(S.noteReturn || '#/notes');
     else go(c ? `#/a/${encodeURIComponent(c.icao)}/${c.tab}` : '#/');
     S.noteReturn = null;
   },
   kneeboard: () => {
     // From a chart: remember it, so ‹ on the note page comes straight back.
-    S.noteReturn = S.view === 'viewer' && S.viewerMode === 'chart' ? location.hash : null;
+    S.noteReturn = (S.view === 'viewer' && S.viewerMode === 'chart') || S.view === 'map' ? location.hash : null;
     const last = S.kv.lastNote && S.notes.get(S.kv.lastNote);
     go(last ? `#/n/${last.id}` : '#/notes');
   },
@@ -1314,6 +1727,57 @@ const actions = {
     const on = toggleFav(c.icao, c.key);
     const b = document.getElementById('vfav'); b.textContent = on ? '★' : '☆'; b.classList.toggle('on', on);
   },
+  'v-map': () => { S.chartReturn = null; go('#/map'); },
+  'map-back': () => go('#/'),
+  'map-zoom': (t) => mmap?.zoomBy(+t.dataset.f),
+  'map-follow': () => {
+    if (!mmap) return;
+    mmap.follow = !mmap.follow;
+    if (mmap.follow && !usableFix()[0]) toast(S.kv.gps ? 'Follow is on — waiting for a GPS position' : 'Follow is on — tap ➤ to turn the GPS on');
+    updateMapButtons(); updateMapOwn(); mmap.invalidate();
+  },
+  'map-orient': () => {
+    if (!mmap) return;
+    mmap.trackUp = !mmap.trackUp;
+    if (mmap.trackUp) mmap.follow = true; // track up only makes sense centred on you
+    if (!mmap.trackUp) mmap.rot = 0;
+    updateMapButtons(); updateMapOwn(); mmap.invalidate();
+  },
+  'map-night': () => {
+    setKv('mapNight', !mapNight());
+    document.querySelector('.mapview')?.classList.toggle('map-night', mapNight());
+    document.getElementById('mnight')?.classList.toggle('on', mapNight());
+    if (mmap) { mmap.palette = PALETTES[mapNight() ? 'night' : 'day']; mmap.invalidate(); }
+  },
+  'map-close': () => closeMapPanel(),
+  'map-nearest': () => { if (!mmap) return; if (S.mapSel?.kind === 'nearest') { closeMapPanel(); return; } closeMapPanel(); S.mapSel = { kind: 'nearest' }; refreshMapPanel(); },
+  'map-layers': () => { if (!mmap) return; if (S.mapSel?.kind === 'layers') { closeMapPanel(); return; } closeMapPanel(); S.mapSel = { kind: 'layers' }; refreshMapPanel(); },
+  'map-layer': (t) => {
+    if (!mmap) return;
+    mmap.layers[t.dataset.k] = !mmap.layers[t.dataset.k];
+    setKv('mapLayers', { ...mmap.layers });
+    mmap.invalidate(); refreshMapPanel();
+  },
+  'map-goto': (t) => {
+    const a = mapCache.data?.airports[+t.dataset.i];
+    if (!a || !mmap) return;
+    if (mmap.follow) { mmap.follow = false; updateMapButtons(); }
+    mmap.setCenter(a.lat, a.lon);
+    if (mmap.spanNm > 60) mmap.setSpan(40);
+    selectOnMap(a);
+  },
+  'map-tab': (t) => { S.mapSelTab = S.mapSelTab === t.dataset.tab ? null : t.dataset.tab; refreshMapPanel(); },
+  'map-chart': (t) => { S.chartReturn = '#/map'; go(chartHash(t.dataset.icao, t.dataset.tab, t.dataset.key, 0)); },
+  'map-airport': (t) => go(`#/a/${encodeURIComponent(t.dataset.icao)}`),
+  'del-map': async () => {
+    const info = mapDataInfo(); if (!info) return;
+    const ok = await dialog({ title: 'Delete the map data?', html: '<p>Removes the moving-map file from this iPad. Import _map_data.zip again to get it back.</p>', buttons: [{ label: 'Cancel', value: false }, { label: 'Delete', value: true, cls: 'danger' }] });
+    if (!ok) return;
+    await store.deleteMapFile(info.name, info.where);
+    setKv('mapFile', null);
+    mapCache.data = null; mapCache.promise = null; mapCache.file = null;
+    route();
+  },
   'compass-offset': (t) => { setKv('compassOffset', +t.dataset.v); gps.compassOffset = +t.dataset.v; route(); },
   gps: async (t) => {
     const on = !S.kv.gps;
@@ -1323,12 +1787,12 @@ const actions = {
       await Gps.askCompass(); // iOS: must come from this tap
       gpsRun(true);
       const cur = S.cur;
-      if (cur?.kind === 'chart') chartGeo(cur).then(updateOwn);
+      if (S.view === 'viewer' && cur?.kind === 'chart') chartGeo(cur).then(updateOwn);
       toast('GPS on — situational awareness only');
     } else {
       gpsRun(false);
     }
-    updateOwn();
+    if (S.view === 'map') updateMapOwn(); else updateOwn();
   },
   'v-rotate': () => {
     const c = S.cur; if (!c || !viewer) return;
@@ -1449,6 +1913,7 @@ function route() {
     else if (parts[0] === 'settings') renderSettings();
     else if (parts[0] === 'notes') renderNotes();
     else if (parts[0] === 'n' && parts[1]) renderNote(parts[1]);
+    else if (parts[0] === 'map') renderMap();
     else renderHome();
   } catch (e) {
     console.error(e);
@@ -1517,6 +1982,6 @@ async function start() {
 }
 
 // Small hook used for automated testing on the PC (imports File objects).
-window.chartApp = { importFiles, state: S };
+window.chartApp = { importFiles, state: S, map: () => mmap, gps };
 
 start();

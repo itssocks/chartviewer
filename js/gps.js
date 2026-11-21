@@ -84,7 +84,11 @@ export class Gps {
     const c = p.coords;
     const kt = c.speed != null && c.speed >= 0 ? c.speed * KT : 0;
     const track = c.heading != null && !Number.isNaN(c.heading) && kt >= 3 ? c.heading : null;
-    this.fix = { lat: c.latitude, lon: c.longitude, acc: c.accuracy, kt, track, alt: c.altitude, time: p.timestamp };
+    this.fix = {
+      lat: c.latitude, lon: c.longitude, acc: c.accuracy, kt, track, time: p.timestamp,
+      speedOk: c.speed != null && c.speed >= 0,
+      alt: c.altitude, altAcc: c.altitudeAccuracy,
+    };
     if (track != null && kt >= FAST * 0.6) this.lastTrack = track;
     this.error = '';
     this._update();
