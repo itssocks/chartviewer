@@ -135,6 +135,13 @@ export async function parseAirportPdf(pdfjsLib, data, fileName, index) {
       const i = part.indexOf('=');
       if (i > 0) revByPage[+part.slice(0, i)] = part.slice(i + 1);
     }
+    const rwyByPage = {};
+    for (const part of String(custom.ChartRunways || '').split(';')) {
+      const i = part.indexOf('=');
+      if (i > 0) rwyByPage[+part.slice(0, i)] = part.slice(i + 1).split(',').filter(Boolean);
+    }
+    let aptInfo = null;
+    try { aptInfo = custom.AirportInfo ? JSON.parse(custom.AirportInfo) : null; } catch { aptInfo = null; }
     const ieByNumber = {};
     if (ie?.charts) for (const c of ie.charts) ieByNumber[c.number + '@' + c.page] = c;
 
@@ -168,6 +175,7 @@ export async function parseAirportPdf(pdfjsLib, data, fileName, index) {
       c.key = key;
       const ic = ieByNumber[c.number + '@' + c.page];
       c.rev = revByPage[c.page] || ic?.rev || '';
+      c.runways = rwyByPage[c.page] || ic?.runways || [];
     }
     charts.sort((a, b) => compareNumbers(a.number, b.number) || a.page - b.page);
 
@@ -182,6 +190,7 @@ export async function parseAirportPdf(pdfjsLib, data, fileName, index) {
       cycle, validFrom, validTo,
       numPages,
       charts,
+      info: aptInfo || ie?.info || null,
       flags,
     };
   } finally {
@@ -200,11 +209,13 @@ export function enrichFromIndex(rec, index) {
   set('country', (ie.country || '').toUpperCase());
   set('validFrom', ie.valid_from || index.valid_from);
   set('validTo', ie.valid_to || index.valid_to);
+  set('info', ie.info);
   const byKey = {};
   for (const c of ie.charts || []) byKey[c.number + '@' + c.page] = c;
   for (const c of rec.charts) {
     const x = byKey[c.number + '@' + c.page];
     if (x && !c.rev && x.rev) { c.rev = x.rev; changed = true; }
+    if (x && !c.runways?.length && x.runways?.length) { c.runways = x.runways; changed = true; }
   }
   return changed;
 }

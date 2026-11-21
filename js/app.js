@@ -6,7 +6,7 @@ import { parseAirportPdf, enrichFromIndex, compareNumbers } from './pdfindex.js'
 import { ChartViewer } from './viewer.js';
 import { TEMPLATES, templateById, makeNotePage } from './notepad.js';
 
-export const APP_VERSION = '1.1.0';
+export const APP_VERSION = '1.2.0';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -25,7 +25,7 @@ const KV_DEFAULTS = {
   favorites: [], recents: [], flight: { dep: '', arr: '', alt: '' },
   theme: 'auto', chartNight: false, dim: 1,
   tool: { kind: 'pen', color: 'red', width: 'thin' },
-  last: {}, index: null, rotation: {}, lastNote: '', lastBackup: 0,
+  last: {}, index: null, rotation: {}, rwy: {}, lastNote: '', lastBackup: 0,
 };
 
 const S = { airports: new Map(), kv: {}, ann: new Map(), view: null, missing: new Set(), notes: new Map() };
@@ -97,6 +97,18 @@ function mainCycle() {
 
 const sortedAirports = () => [...S.airports.values()].sort((a, b) => a.icao.localeCompare(b.icao));
 const chartsInTab = (a, tab) => a.charts.filter((c) => tabOf(c.cat) === tab);
+
+// Runway filter: '' = all. Charts without runway info always show.
+const rwyFilter = (a) => (S.kv.rwy || {})[a.icao] || '';
+const passRwy = (a, c) => { const f = rwyFilter(a); return !f || !c.runways?.length || c.runways.includes(f); };
+const chartsShown = (a, tab) => chartsInTab(a, tab).filter((c) => passRwy(a, c));
+function airportRunways(a) {
+  const set = new Set();
+  for (const r of a.info?.runways || []) for (const id of r.ids) set.add(id);
+  for (const c of a.charts) for (const r of c.runways || []) set.add(r);
+  return [...set].sort();
+}
+const countryName = (a) => a.info?.country_name || a.country || 'Other';
 const findChart = (a, key) => a?.charts.find((c) => c.key === key);
 const annId = (a, key, pidx) => `${a.icao}|${key}${pidx ? '@' + pidx : ''}|${a.cycle}`;
 const hasAnn = (a, c) => { for (let i = 0; i < (c.pages || 1); i++) if (S.ann.get(annId(a, c.key, i))?.n) return true; return false; };
@@ -180,6 +192,12 @@ function flightBar(currentIcao) {
   }).join('')}<button class="fedit" data-act="edit-flight" aria-label="Edit flight">✎</button></nav>`;
 }
 
+function rwyTags(a, c) {
+  const r = c.runways || [];
+  if (!r.length || r.length >= airportRunways(a).length) return '';
+  return `<span class="rtags">${r.map((x) => `<i>${esc(x)}</i>`).join('')}</span>`;
+}
+
 function chartRow(a, c, tab, showTab = false) {
   const fav = isFav(a.icao, c.key);
   return `<div class="row chart-row">
@@ -187,6 +205,7 @@ function chartRow(a, c, tab, showTab = false) {
     <button class="row-main" data-act="open-chart" data-icao="${esc(a.icao)}" data-key="${esc(c.key)}" data-tab="${tab}">
       <span class="num">${esc(c.number || '—')}</span>
       <span class="ttl">${esc(c.title)}${showTab ? ` <em>${esc(tabLabel(tabOf(c.cat)))}</em>` : ''}</span>
+      ${rwyTags(a, c)}
       ${hasAnn(a, c) ? '<span class="annmark" title="Has notes">✎</span>' : ''}
       ${c.unindexed ? '<span class="warnmark">⚠</span>' : ''}
     </button></div>`;
@@ -205,9 +224,10 @@ function savedChartRow(item, kind) {
     </button></div>`;
 }
 
-function airportRow(a) {
+function airportRow(a, slot = '') {
   const st = cycleState(a);
   return `<button class="row apt-row" data-act="open-airport" data-icao="${esc(a.icao)}">
+    ${slot ? `<span class="pill slot">${slot}</span>` : ''}
     <span class="apt-code">${esc(a.icao)}${a.iata ? `<small>${esc(a.iata)}</small>` : ''}</span>
     <span class="apt-name">${esc(a.name)}<small>${esc([a.city, a.country].filter(Boolean).join(', '))}</small></span>
     ${a.flags?.length ? '<span class="warnmark" title="Check this PDF">⚠</span>' : ''}
@@ -287,11 +307,23 @@ function fillHomeResults() {
     box.innerHTML = res.length ? `<div class="list">${res.map(airportRow).join('')}</div>` : `<p class="muted pad">No airport matches “${esc(q)}”.</p>`;
     return;
   }
-  const favs = S.kv.favorites, rec = S.kv.recents.slice(0, 12);
+  const favs = S.kv.favorites;
+  const allRec = S.kv.recents.filter((r) => S.airports.has(r.icao));
+  const rec = S.allRecents ? allRec : allRec.slice(0, 5);
+  const fl = SLOTS.map(([s, l]) => [l, S.airports.get(S.kv.flight[s])]).filter(([, a]) => a);
+  const groups = new Map();
+  for (const a of sortedAirports()) {
+    const k = countryName(a);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(a);
+  }
+  const countries = [...groups.keys()].sort((x, y) => x.localeCompare(y));
   box.innerHTML = `
+    ${fl.length ? `<h3 class="sec">This flight</h3><div class="list">${fl.map(([l, a]) => airportRow(a, l)).join('')}</div>` : ''}
     ${favs.length ? `<h3 class="sec">★ Favorites</h3><div class="list">${favs.map((f) => savedChartRow(f, 'fav')).join('')}</div>` : ''}
-    ${rec.length ? `<h3 class="sec">Recent charts</h3><div class="list">${rec.map((r) => savedChartRow(r, 'recent')).join('')}</div>` : ''}
-    <h3 class="sec">Airports (${S.airports.size})</h3><div class="list">${sortedAirports().map(airportRow).join('')}</div>`;
+    ${rec.length ? `<h3 class="sec">Recent charts</h3><div class="list">${rec.map((r) => savedChartRow(r, 'recent')).join('')}
+      ${allRec.length > 5 ? `<button class="row more-row" data-act="more-recents">${S.allRecents ? 'Show fewer' : `Show all ${allRec.length}`}</button>` : ''}</div>` : ''}
+    ${countries.map((k) => `<h3 class="sec">${esc(k)} (${groups.get(k).length})</h3><div class="list">${groups.get(k).map((a) => airportRow(a)).join('')}</div>`).join('')}`;
 }
 
 // ================================================================ airport
@@ -344,9 +376,10 @@ function renderAirport(icao, tab) {
     </div>
     ${carry.length ? `<div class="strip blue">${carry.length} chart${carry.length > 1 ? 's' : ''} with your notes from cycle ${esc(carry[0].cycle)} did not change. <button class="btn small" data-act="carry" data-icao="${esc(icao)}">Bring notes over</button></div>` : ''}
     <nav class="tabs">${TABS.map((t) => {
-      const n = chartsInTab(a, t.id).length;
+      const n = chartsShown(a, t.id).length;
       return `<button class="tab ${t.id === tab ? 'on' : ''} ${n ? '' : 'none'}" data-act="nav" data-replace="1" data-to="#/a/${esc(icao)}/${t.id}">${t.label}<small>${n}</small></button>`;
     }).join('')}</nav>
+    ${rwyBar(a)}
     <main class="scroll" id="chartlist"></main>`;
   const inp = document.getElementById('chq');
   const fill = () => {
@@ -362,14 +395,67 @@ function renderAirport(icao, tab) {
       res.sort((x, y) => TABS.findIndex((t) => t.id === tabOf(x.cat)) - TABS.findIndex((t) => t.id === tabOf(y.cat)) || compareNumbers(x.number, y.number));
       box.innerHTML = res.length ? `<div class="list">${res.map((c) => chartRow(a, c, tabOf(c.cat), true)).join('')}</div>` : `<p class="muted pad">No chart matches “${esc(inp.value)}”.</p>`;
     } else {
-      const list = chartsInTab(a, tab);
-      box.innerHTML = list.length ? `<div class="list">${list.map((c) => chartRow(a, c, tab)).join('')}</div>` : `<p class="muted pad">No ${esc(tabLabel(tab))} charts for ${esc(icao)}.</p>`;
+      const list = chartsShown(a, tab);
+      const f = rwyFilter(a);
+      box.innerHTML = (tab === 'INFO' ? airportInfoCard(a) : '') + (list.length
+        ? `<div class="list">${list.map((c) => chartRow(a, c, tab)).join('')}</div>`
+        : `<p class="muted pad">No ${esc(tabLabel(tab))} charts for ${esc(icao)}${f ? ` runway ${esc(f)}` : ''}.</p>`);
     }
   };
   inp.addEventListener('input', fill);
   fill();
   S.kv.last[icao] = { ...(S.kv.last[icao] || {}), tab };
   setKv('last', S.kv.last);
+}
+
+function rwyBar(a) {
+  const rws = airportRunways(a);
+  if (!rws.length) return '';
+  const f = rwyFilter(a);
+  const b = (r, label) => `<button class="rchip ${f === r ? 'on' : ''}" data-act="rwy" data-icao="${esc(a.icao)}" data-r="${esc(r)}">${esc(label)}</button>`;
+  return `<div class="rwybar"><span class="rwylbl">RWY</span>${b('', 'All')}${rws.map((r) => b(r, r)).join('')}</div>`;
+}
+
+function fmtLatLon(v, pos, neg, w) {
+  if (v == null) return '';
+  const a = Math.abs(v), d = Math.floor(a), m = (a - d) * 60;
+  return `${v < 0 ? neg : pos}${String(d).padStart(w, '0')}°${m.toFixed(1).padStart(4, '0')}'`;
+}
+function utcText(u) {
+  // Jeppesen "+5:00=UTC" means local time + 5 h = UTC, i.e. UTC−5.
+  const m = /^([+-])(\d+):(\d+)/.exec(u || '');
+  if (!m) return '';
+  return `UTC${m[1] === '+' ? '−' : '+'}${+m[2]}${m[3] !== '00' ? ':' + m[3] : ''}`;
+}
+const CAT = { 1: 'CAT I', 2: 'CAT II', 3: 'CAT III' };
+
+function airportInfoCard(a) {
+  const i = a.info;
+  if (!i) return '';
+  const tl = i.tl && i.tl !== '-1' ? i.tl : '—';
+  const mv = /^([EW])0*(\d+(?:\.\d)?)/.exec(i.magvar || '');
+  const facts = [
+    ['Elevation', i.elev ? `${Number(i.elev).toLocaleString('en-US')} ft` : ''],
+    ['Trans. alt / level', `${i.ta ? Number(i.ta).toLocaleString('en-US') + ' ft' : '—'} / ${tl}`],
+    ['Mag. variation', mv ? `${parseFloat(mv[2])}° ${mv[1]}` : ''],
+    ['Time', utcText(i.utc)],
+    ['Position', `${fmtLatLon(i.lat, 'N', 'S', 2)} ${fmtLatLon(i.lon, 'E', 'W', 3)}`],
+  ].filter(([, v]) => v && v.trim());
+  const rws = (i.runways || []).map((r) => {
+    const extra = [];
+    for (const e of r.ends || []) {
+      if (e.ils) extra.push(`ILS ${e.id} <b>${esc(e.ils)}</b>${CAT[e.ils_cat] ? ' ' + CAT[e.ils_cat] : ''}`);
+      if (e.displaced_ft) extra.push(`${e.id} displaced thr. ${e.displaced_ft.toLocaleString('en-US')} ft`);
+    }
+    return `<div class="rwyline"><b class="rwyid">${r.ids.map(esc).join(' / ')}</b>
+      <span>${r.length_ft ? `≈ ${r.length_ft.toLocaleString('en-US')} ft · ${r.length_m.toLocaleString('en-US')} m` : ''}</span>
+      ${extra.length ? `<small>${extra.join(' · ')}</small>` : ''}</div>`;
+  }).join('');
+  return `<section class="infocard">
+    <div class="facts">${facts.map(([k, v]) => `<div><small>${k}</small><b>${esc(v)}</b></div>`).join('')}</div>
+    ${rws ? `<div class="rwys"><small class="lbl">Runways</small>${rws}</div>` : ''}
+    <p class="note">From this cycle's nav data. Lengths are approximate; declared distances and frequencies are on the 10-9.</p>
+  </section>`;
 }
 
 // ================================================================ viewer
@@ -410,7 +496,7 @@ function flushSave() {
 
 function sequence(a, tab) {
   const seq = [];
-  for (const c of chartsInTab(a, tab)) for (let i = 0; i < (c.pages || 1); i++) seq.push([c, i]);
+  for (const c of chartsShown(a, tab)) for (let i = 0; i < (c.pages || 1); i++) seq.push([c, i]);
   return seq;
 }
 
@@ -926,6 +1012,13 @@ const actions = {
     setKv('flight', f);
     route();
   },
+  rwy: (t) => {
+    const m = { ...(S.kv.rwy || {}) };
+    if (t.dataset.r) m[t.dataset.icao] = t.dataset.r; else delete m[t.dataset.icao];
+    setKv('rwy', m);
+    route();
+  },
+  'more-recents': () => { S.allRecents = !S.allRecents; fillHomeResults(); },
   carry: async (t) => { const a = S.airports.get(t.dataset.icao); await carryOver(a, carryCandidates(a)); toast('Notes brought over'); route(); },
   theme: (t) => { setKv('theme', t.dataset.v); applyTheme(); route(); },
   'del-airport': async (t) => {
@@ -1167,7 +1260,12 @@ async function start() {
   route();
   setupServiceWorker();
   // Check every airport's PDF is still on the device; flag any that aren't.
-  for (const a of S.airports.values()) if (!(await store.pdfExists(a.file, a.where))) S.missing.add(a.icao);
+  for (const a of [...S.airports.values()]) {
+    if (await store.pdfExists(a.file, a.where)) continue;
+    // Re-check with the current record: an import may have just replaced this file.
+    const now = S.airports.get(a.icao);
+    if (now && !(await store.pdfExists(now.file, now.where))) S.missing.add(a.icao);
+  }
   if (S.missing.size) {
     route();
     toast(`Chart files missing: ${[...S.missing].join(', ')} — import them again`);

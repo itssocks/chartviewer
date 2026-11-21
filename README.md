@@ -131,6 +131,14 @@ If step 4 fails, open the app once online, wait for "Ready for offline use", and
 
 - **Going back**: tap ‹, or swipe right from the left edge of the screen, or swipe right along the top bar.
 - **Search**: type ICAO, IATA, airport name or city on the first screen.
+- **Home**: your DEP/ARR/ALT airports on top, the last 5 charts ("Show all" for more), then
+  airports grouped by country.
+- **Runway filter**: on an airport, the RWY buttons (All · 03L · 03R …) show only the charts for
+  that runway in every tab, and swiping follows it. Charts for every runway (10-9, text pages)
+  always show. The choice is remembered per airport.
+- **Airport info**: Info / Taxi starts with elevation, transition altitude/level, magnetic
+  variation, UTC offset and runways (approx. length, displaced thresholds, ILS). Frequencies and
+  declared distances stay on the 10-9.
 - **Airport**: tabs Info / Taxi · SID · STAR · Approach · Other. The box at the top
   filters charts by title, e.g. `ILS 03`. ☆ makes a favorite.
 - **Flight tabs (DEP / ARR / ALT)**: on an airport screen tap DEP, ARR or ALT to pin it.
