@@ -8,7 +8,7 @@
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const BASE_MAX_PIXELS = 6e6;    // full-page canvas size limit (iPad memory friendly)
-const DETAIL_MAX_PIXELS = 9e6;  // sharp "zoomed" canvas limit
+const DETAIL_MAX_PIXELS = 9e6;  // sharp canvas limit (screen-sized, so normally well below)
 const MAX_ZOOM = 10;            // times the fit zoom
 
 // Plane seen from above, nose up, ~34 px long, centred on the position.
@@ -19,8 +19,9 @@ export const EDGE_BACK_PX = 24;
 const HIGHLIGHT_WIDTH = 10;
 
 export class ChartViewer {
-  constructor(stage, { onSwipe, onInkChange, getTool }) {
+  constructor(stage, { onSwipe, onInkChange, getTool, onRenderError }) {
     this.stage = stage;
+    this.onRenderError = onRenderError;
     this.onSwipe = onSwipe;
     this.onInkChange = onInkChange;
     this.getTool = getTool;
@@ -43,8 +44,17 @@ export class ChartViewer {
     this.gOwn.setAttribute('class', 'own');
     this.gOwn.innerHTML = `<circle class="own-acc" cx="0" cy="0" r="0"></circle>
       <g class="own-icon"><path class="own-plane" d="${PLANE}"></path><circle class="own-dot" r="7"></circle></g>`;
-    this.inner.append(this.paper, this.svg);
-    stage.append(this.inner);
+    // Layers, bottom to top:
+    //  1. .pv-page  - full-page canvas, moved/zoomed with a CSS transform (fast, blurry when zoomed)
+    //  2. .pv-sharp - canvas drawn at exactly the screen's pixels for the visible part, NOT
+    //                 inside the zoomed layer, so Safari never stretches it (sharp)
+    //  3. .pv-inkwrap - notes + GPS icon (vector), same transform as layer 1
+    this.inkWrap = el('div', 'pv-inkwrap');
+    this.inkWrap.append(this.svg);
+    this.inner.append(this.paper);
+    stage.append(this.inner, this.inkWrap);
+    this.sharp = null;
+    this.sharpAt = null;
 
     this.s = 1; this.tx = 0; this.ty = 0; this.fitS = 1;
     this.rot = 0;
@@ -70,6 +80,7 @@ export class ChartViewer {
     this._dropDetail();
     this.g.innerHTML = '';
     this.inner.style.visibility = 'hidden';
+    this.inkWrap.style.visibility = 'hidden';
   }
 
   async show(page, { rotation = 0, strokes = [] } = {}) {
@@ -105,8 +116,10 @@ export class ChartViewer {
     this.vpRotation = r;
     const v = p.getViewport({ scale: 1, rotation: r });
     this.W = v.width; this.H = v.height;
-    this.inner.style.width = this.W + 'px';
-    this.inner.style.height = this.H + 'px';
+    for (const e of [this.inner, this.inkWrap]) {
+      e.style.width = this.W + 'px';
+      e.style.height = this.H + 'px';
+    }
     this.svg.setAttribute('width', this.W);
     this.svg.setAttribute('height', this.H);
     this.svg.setAttribute('viewBox', `0 0 ${this.W} ${this.H}`);
@@ -160,10 +173,24 @@ export class ChartViewer {
   _setView(s, tx, ty, animate = false, clampIt = true) {
     if (clampIt) [tx, ty] = this._clamp(s, tx, ty);
     this.s = s; this.tx = tx; this.ty = ty;
-    this.inner.style.transition = animate ? 'transform .18s ease-out' : 'none';
-    this.inner.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
+    this._applyTransform(tx, ty, s, animate);
     this._drawOwn();
     this._scheduleDetail();
+  }
+
+  /** Move all layers to a view (the sharp layer follows until it's redrawn). */
+  _applyTransform(tx, ty, s, animate = false) {
+    const tr = animate ? 'transform .18s ease-out' : 'none';
+    for (const e of [this.inner, this.inkWrap]) {
+      e.style.transition = tr;
+      e.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
+    }
+    const a = this.sharpAt;
+    if (this.sharp && a) {
+      const r = s / a.s;
+      this.sharp.style.transition = tr;
+      this.sharp.style.transform = `translate(${r * (a.L - a.tx) + tx - a.L}px, ${r * (a.T - a.ty) + ty - a.T}px) scale(${r})`;
+    }
   }
 
   /**
@@ -205,9 +232,13 @@ export class ChartViewer {
     c.width = Math.round(this.W * b); c.height = Math.round(this.H * b);
     const vp = page.getViewport({ scale: b, rotation: this.vpRotation });
     this.baseTask = page.render({ canvasContext: c.getContext('2d', { alpha: false }), viewport: vp });
-    try { await this.baseTask.promise; } catch (e) { if (e?.name !== 'RenderingCancelledException') console.warn(e); return; }
+    try { await this.baseTask.promise; } catch (e) {
+      if (e?.name !== 'RenderingCancelledException') { console.warn(e); this.onRenderError?.(`chart: ${e?.message || e}`); }
+      return;
+    }
     if (gen !== this.gen) { c.width = c.height = 0; return; }
     this.inner.style.visibility = '';
+    this.inkWrap.style.visibility = '';
     this.base.replaceWith(c);
     this.base.width = this.base.height = 0;
     this.base = c;
@@ -216,44 +247,49 @@ export class ChartViewer {
   }
 
   _dropDetail() {
-    if (this.detail) { this.detail.width = this.detail.height = 0; this.detail.remove(); this.detail = null; }
+    if (this.sharp) { this.sharp.width = this.sharp.height = 0; this.sharp.remove(); this.sharp = null; }
+    this.sharpAt = null;
   }
 
   _scheduleDetail() {
     clearTimeout(this.detailTimer);
     if (this.detailTask) { try { this.detailTask.cancel(); } catch { /* */ } this.detailTask = null; }
-    this.detailTimer = setTimeout(() => {
-      if (!this.pointers.size) this.inner.style.willChange = 'auto';
-      this._renderDetail();
-    }, 160);
+    this.detailTimer = setTimeout(() => this._renderDetail(), 160);
   }
 
+  /** Draw the visible part of the chart at exactly the screen's resolution. */
   async _renderDetail() {
     if (!this.page || this.pointers.size) return;
     const gen = this.gen;
-    let k = this.s * this.dpr;
-    if (!this.baseScale || k <= this.baseScale * 1.1) { this._dropDetail(); return; }
+    if (!this.baseScale || this.s * this.dpr <= this.baseScale * 1.05) { this._dropDetail(); return; }
     const sw = this.stage.clientWidth, sh = this.stage.clientHeight;
-    const x0 = Math.max(0, -this.tx / this.s), y0 = Math.max(0, -this.ty / this.s);
-    const x1 = Math.min(this.W, (sw - this.tx) / this.s), y1 = Math.min(this.H, (sh - this.ty) / this.s);
-    if (x1 <= x0 || y1 <= y0) return;
-    if ((x1 - x0) * (y1 - y0) * k * k > DETAIL_MAX_PIXELS) k = Math.sqrt(DETAIL_MAX_PIXELS / ((x1 - x0) * (y1 - y0)));
+    const s = this.s, tx = this.tx, ty = this.ty;
+    // visible part of the page, in screen (CSS) pixels
+    const L = Math.max(0, Math.floor(tx)), T = Math.max(0, Math.floor(ty));
+    const R = Math.min(sw, Math.ceil(tx + this.W * s)), B = Math.min(sh, Math.ceil(ty + this.H * s));
+    if (R <= L || B <= T) return;
+    let d = this.dpr;
+    if ((R - L) * (B - T) * d * d > DETAIL_MAX_PIXELS) d = Math.sqrt(DETAIL_MAX_PIXELS / ((R - L) * (B - T)));
     const c = document.createElement('canvas');
-    c.className = 'pv-detail';
-    c.width = Math.ceil((x1 - x0) * k); c.height = Math.ceil((y1 - y0) * k);
-    const vp = this.page.getViewport({ scale: k, rotation: this.vpRotation });
-    const task = this.page.render({
-      canvasContext: c.getContext('2d', { alpha: false }), viewport: vp,
-      transform: [1, 0, 0, 1, -x0 * k, -y0 * k],
-    });
+    c.className = 'pv-sharp';
+    c.width = Math.round((R - L) * d); c.height = Math.round((B - T) * d);
+    const ctx = c.getContext('2d', { alpha: false });
+    if (!ctx) { this.onRenderError?.('no canvas memory for the sharp view'); return; }
+    const vp = this.page.getViewport({ scale: s * d, rotation: this.vpRotation });
+    const task = this.page.render({ canvasContext: ctx, viewport: vp, transform: [1, 0, 0, 1, (tx - L) * d, (ty - T) * d] });
     this.detailTask = task;
-    try { await task.promise; } catch (e) { c.width = c.height = 0; return; }
-    if (gen !== this.gen || this.detailTask !== task) { c.width = c.height = 0; return; }
+    try { await task.promise; } catch (e) {
+      c.width = c.height = 0;
+      if (e?.name !== 'RenderingCancelledException') this.onRenderError?.(`sharp view: ${e?.message || e}`);
+      return;
+    }
+    if (gen !== this.gen || this.detailTask !== task || s !== this.s || tx !== this.tx || ty !== this.ty) { c.width = c.height = 0; return; }
     this.detailTask = null;
-    Object.assign(c.style, { left: x0 + 'px', top: y0 + 'px', width: c.width / k + 'px', height: c.height / k + 'px' });
+    Object.assign(c.style, { left: L + 'px', top: T + 'px', width: (R - L) + 'px', height: (B - T) + 'px' });
     this._dropDetail();
-    this.detail = c;
-    this.paper.append(c);
+    this.sharp = c;
+    this.sharpAt = { s, tx, ty, L, T };
+    this.stage.insertBefore(c, this.inkWrap);
   }
 
   // ------------------------------------------------------------- ink
@@ -404,9 +440,6 @@ export class ChartViewer {
   }
 
   _gestureStart(t) {
-    // Smooth moving while a finger is down; dropped again when the chart settles
-    // (see _scheduleDetail) so Safari redraws it sharp instead of stretching a picture.
-    this.inner.style.willChange = 'transform';
     const pts = [...this.pointers.values()];
     this.g0 = { s: this.s, tx: this.tx, ty: this.ty, t, n: pts.length, moved: false };
     if (pts.length === 1) {
@@ -432,8 +465,7 @@ export class ChartViewer {
       g.dx = dx; g.dy = dy;
       if (this.isAtFit() && !g.pinch) {
         // At "fit" a horizontal drag is a swipe: give a little visual feedback.
-        this.inner.style.transition = 'none';
-        this.inner.style.transform = `translate(${this.tx + dx * 0.35}px, ${this.ty}px) scale(${this.s})`;
+        this._applyTransform(this.tx + dx * 0.35, this.ty, this.s);
       } else {
         this._setView(this.s, g.tx + dx, g.ty + dy);
       }

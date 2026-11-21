@@ -8,7 +8,7 @@ import { TEMPLATES, templateById, makeNotePage } from './notepad.js';
 import { Gps, parseMagvar } from './gps.js';
 import { georefFromText, linesFromOps, toChart } from './georef.js';
 
-export const APP_VERSION = '1.4.0';
+export const APP_VERSION = '1.4.1';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -27,7 +27,7 @@ const KV_DEFAULTS = {
   favorites: [], recents: [], flight: { dep: '', arr: '', alt: '' },
   theme: 'auto', chartNight: false, dim: 1,
   tool: { kind: 'pen', color: 'red', width: 'thin' },
-  last: {}, index: null, rotation: {}, rwy: {}, wx: {}, wxRelay: '', gps: false, lastNote: '', lastBackup: 0,
+  last: {}, index: null, rotation: {}, rwy: {}, wx: {}, wxRelay: '', gps: false, compassOffset: 0, lastNote: '', lastBackup: 0,
 };
 
 const S = { airports: new Map(), kv: {}, ann: new Map(), view: null, missing: new Set(), notes: new Map() };
@@ -718,6 +718,7 @@ async function renderViewer(icao, tab, key, pidx) {
     if (S.cur === cur) loading.style.display = 'none';
     cur.page = page;
     gps.magvar = parseMagvar(a.info?.magvar);
+    gps.compassOffset = S.kv.compassOffset || 0;
     if (S.kv.gps) chartGeo(cur).then(updateOwn);
     updateOwn();
     // pre-load the next chart's page so swiping is quick
@@ -822,6 +823,7 @@ function ensureViewer(mode) {
     onSwipe: (dir) => stepChart(dir),
     onInkChange: (strokes) => queueSave(strokes),
     getTool: toolState,
+    onRenderError: (msg) => { if (!S.renderErrShown) { S.renderErrShown = true; toast(`Display problem: ${msg}`); } },
   });
   setWake(true);
 }
@@ -966,6 +968,11 @@ async function renderSettings() {
         <label class="field"><input id="wx-relay" value="${esc(S.kv.wxRelay)}" placeholder="https://chartviewer-wx.yourname.workers.dev" style="text-transform:none" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="url"></label>
         <button class="btn primary" data-act="wx-save">Save & test</button>
         <span id="wx-test" class="muted"></span>
+      </section>
+      <section class="card">
+        <h3>GPS</h3>
+        <p class="muted">The ➤ button on a chart shows your position (situational awareness only). If the plane points the wrong way when you're stopped, the compass needs a correction:</p>
+        <div class="seg">${[[0, 'None'], [90, '+90°'], [180, '180°'], [-90, '−90°']].map(([v, l]) => `<button class="${(S.kv.compassOffset || 0) === v ? 'on' : ''}" data-act="compass-offset" data-v="${v}">${l}</button>`).join('')}</div>
       </section>
       <section class="card">
         <h3>Menus</h3>
@@ -1307,6 +1314,7 @@ const actions = {
     const on = toggleFav(c.icao, c.key);
     const b = document.getElementById('vfav'); b.textContent = on ? '★' : '☆'; b.classList.toggle('on', on);
   },
+  'compass-offset': (t) => { setKv('compassOffset', +t.dataset.v); gps.compassOffset = +t.dataset.v; route(); },
   gps: async (t) => {
     const on = !S.kv.gps;
     setKv('gps', on);

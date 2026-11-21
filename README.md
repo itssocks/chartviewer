@@ -115,10 +115,10 @@ On the PC:
    ```powershell
    py jepp_export.py --replace
    ```
-   This copies the PDFs **and** `_charts_index.json` into your Jeppesen folder
-   (old ones are moved to `_Old charts`, never deleted).
-4. ☐ Copy the new PDFs and `_charts_index.json` into the **Charts** folder that the iPad
-   uses (OneDrive), replacing the old ones. Wait for OneDrive to finish syncing.
+   This puts the PDFs **and** `_charts_index.json` in `Jeppesen\Current charts`
+   (old ones are moved to `_Old charts`, never deleted). That folder holds only charts.
+4. ☐ Copy everything in **Current charts** (select all) to the folder the iPad uses
+   (OneDrive), replacing the old ones. Wait for OneDrive to finish syncing.
 
 On the iPad:
 

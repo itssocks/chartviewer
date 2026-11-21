@@ -224,9 +224,10 @@ table.apts th { font-size: 13px; color: var(--muted); }
 .pv-page { position: absolute; left: 0; top: 0; transform-origin: 0 0; box-shadow: 0 2px 16px rgba(0, 0, 0, .4); }
 .pv-paper { position: absolute; inset: 0; background: #fff; }
 .pv-base { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
-.pv-detail { position: absolute; }
+.pv-sharp { position: absolute; transform-origin: 0 0; pointer-events: none; }
+.pv-inkwrap { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; }
 .pv-ink { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
-.chart-night .pv-paper { filter: invert(1) hue-rotate(180deg); }
+.chart-night .pv-paper, .chart-night .pv-sharp { filter: invert(1) hue-rotate(180deg); }
 .vdim { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
 .vbanners { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; align-items: center; pointer-events: none; width: max-content; max-width: 94%; }
 .vban { padding: 8px 22px; border-radius: 12px; color: #fff; font-weight: 800; font-size: 26px; text-align: center; box-shadow: 0 4px 16px rgba(0, 0, 0, .35); opacity: .93; }

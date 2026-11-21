@@ -9,8 +9,11 @@
 //     the compass wins.
 //   - without a compass reading, the last good GPS track is kept; with neither,
 //     the icon is a dot without direction.
-// Compass readings are magnetic and relative to the top of the iPad; they're
-// corrected for the screen orientation and the local magnetic variation.
+// Compass readings are magnetic. On the iPad, iOS already gives them relative to
+// the top of the screen as you're holding it (portrait or landscape), so no
+// rotation is added here (adding it put the icon 90 deg off in portrait). They're
+// corrected for the local magnetic variation, plus an optional manual correction
+// (Settings -> GPS) in case a device reports them differently.
 
 const KT = 1.943844;
 const SLOW = 5, FAST = 15;      // kt: blend range compass -> GPS track
@@ -26,6 +29,7 @@ export class Gps {
     this.compass = null;      // deg magnetic, screen-up corrected
     this.compassTime = 0;
     this.magvar = 0;          // deg, east positive (true = magnetic + magvar)
+    this.compassOffset = 0;   // deg, manual correction from Settings
     this.heading = null;      // smoothed true heading shown on the icon
     this.headingSource = '';
     this.lastTrack = null;
@@ -71,8 +75,7 @@ export class Gps {
     if (typeof e.webkitCompassHeading === 'number' && e.webkitCompassHeading >= 0) h = e.webkitCompassHeading; // iOS
     else if (e.absolute && typeof e.alpha === 'number') h = 360 - e.alpha;                                   // others
     if (h == null) return;
-    const angle = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
-    this.compass = norm(h + angle);
+    this.compass = norm(h + this.compassOffset);
     this.compassTime = Date.now();
     this._update();
   }
