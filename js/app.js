@@ -5,8 +5,10 @@ import * as store from './store.js';
 import { parseAirportPdf, enrichFromIndex, compareNumbers } from './pdfindex.js';
 import { ChartViewer } from './viewer.js';
 import { TEMPLATES, templateById, makeNotePage } from './notepad.js';
+import { Gps, parseMagvar } from './gps.js';
+import { georefFromText, linesFromOps, toChart } from './georef.js';
 
-export const APP_VERSION = '1.3.0';
+export const APP_VERSION = '1.4.0';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -25,7 +27,7 @@ const KV_DEFAULTS = {
   favorites: [], recents: [], flight: { dep: '', arr: '', alt: '' },
   theme: 'auto', chartNight: false, dim: 1,
   tool: { kind: 'pen', color: 'red', width: 'thin' },
-  last: {}, index: null, rotation: {}, rwy: {}, wx: {}, wxRelay: '', lastNote: '', lastBackup: 0,
+  last: {}, index: null, rotation: {}, rwy: {}, wx: {}, wxRelay: '', gps: false, lastNote: '', lastBackup: 0,
 };
 
 const S = { airports: new Map(), kv: {}, ann: new Map(), view: null, missing: new Set(), notes: new Map() };
@@ -573,6 +575,7 @@ async function setWake(on) {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && S.view === 'viewer') setWake(true);
   if (document.visibilityState === 'hidden') flushSave();
+  gpsRun(document.visibilityState === 'visible' && S.view === 'viewer' && S.viewerMode === 'chart');
 });
 
 function leaveViewer() {
@@ -582,6 +585,7 @@ function leaveViewer() {
   viewer = null;
   S.view = 'other';
   setWake(false);
+  gpsRun(false);
 }
 
 function flushSave() {
@@ -600,6 +604,7 @@ function toolState() { return S.kv.tool; }
 function viewerShell(mode = 'chart') {
   S.viewerMode = mode;
   const chartBtns = `
+      <button class="iconbtn gpsbtn ${S.kv.gps ? 'on' : ''}" data-act="gps" id="vgps" aria-label="Show my GPS position">➤</button>
       <button class="iconbtn" data-act="kneeboard" aria-label="Kneeboard">📝</button>
       <button class="iconbtn" data-act="v-fav" id="vfav" aria-label="Favorite">☆</button>
       <button class="iconbtn" data-act="v-rotate" aria-label="Rotate">⟳</button>`;
@@ -619,6 +624,7 @@ function viewerShell(mode = 'chart') {
       <div class="vstage" id="vstage"></div>
       <div class="vdim" id="vdimlayer"></div>
       <div class="vbanners" id="vbanners"></div>
+      <div class="vgps" id="vgpsbar"></div>
       <div class="vloading" id="vloading">Loading…</div>
     </div>
     <footer class="vtools" id="vtools"></footer>
@@ -710,6 +716,10 @@ async function renderViewer(icao, tab, key, pidx) {
     const rot = S.kv.rotation[`${icao}|${key}`] ? 90 : 0;
     await viewer.show(page, { rotation: rot, strokes: ann?.strokes || [] });
     if (S.cur === cur) loading.style.display = 'none';
+    cur.page = page;
+    gps.magvar = parseMagvar(a.info?.magvar);
+    if (S.kv.gps) chartGeo(cur).then(updateOwn);
+    updateOwn();
     // pre-load the next chart's page so swiping is quick
     const nx = seq[pos + 1];
     if (nx) doc.getPage(nx[0].page + nx[1]).catch(() => {});
@@ -719,11 +729,95 @@ async function renderViewer(icao, tab, key, pidx) {
   }
 }
 
+// ---------------------------------------------------------------- GPS on charts
+// Situational awareness only. The icon only appears on charts whose plan view
+// passed the georeference checks (see georef.js), inside that plan view.
+
+const gps = new Gps(() => updateOwn());
+const geoCache = new Map(); // "file#page" -> Promise<georef result>
+
+function chartGeo(cur) {
+  if (cur.kind !== 'chart' || !cur.page) return Promise.resolve(null);
+  if (cur.geo) return Promise.resolve(cur.geo);
+  const key = `${cur.a.file}#${cur.c.page + cur.pidx}`;
+  let p = geoCache.get(key);
+  if (!p) {
+    const page = cur.page;
+    p = (async () => {
+      try {
+        const [tc, ol] = await Promise.all([page.getTextContent(), page.getOperatorList()]);
+        return georefFromText(tc.items, cur.a.info, linesFromOps(ol, pdfjsLib.OPS), !!cur.a.aspectFixed);
+      } catch (e) { return { ok: false, reason: 'could not read chart' }; }
+    })();
+    geoCache.set(key, p);
+  }
+  return p.then((g) => { cur.geo = g; return g; });
+}
+
+const R = 6371008.8;
+function distBrg(lat1, lon1, lat2, lon2) {
+  const r = Math.PI / 180, p1 = lat1 * r, p2 = lat2 * r, dl = (lon2 - lon1) * r;
+  const d = 2 * R * Math.asin(Math.sqrt(Math.sin((p2 - p1) / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2));
+  const b = Math.atan2(Math.sin(dl) * Math.cos(p2), Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl)) / r;
+  return [d / 1852, (b + 360) % 360];
+}
+const deg3 = (v) => String(Math.round(v) % 360 || 360).padStart(3, '0');
+
+function gpsStatus(text, cls = '') {
+  const bar = document.getElementById('vgpsbar');
+  if (!bar) return;
+  bar.className = `vgps ${text ? 'show' : ''} ${cls}`;
+  bar.innerHTML = text ? `${text}<small>GPS · situational awareness only</small>` : '';
+}
+
+function updateOwn() {
+  const cur = S.cur;
+  if (!viewer || S.view !== 'viewer') return;
+  if (!S.kv.gps || cur?.kind !== 'chart') { viewer.setOwnship(null); gpsStatus(''); return; }
+  const g = cur.geo;
+  const f = gps.fix;
+  if (!cur.page || g === undefined) { viewer.setOwnship(null); gpsStatus('Checking this chart…'); return; }
+  if (!g || !g.ok) { viewer.setOwnship(null); gpsStatus(`Position not available on this chart${g?.reason ? ` (${esc(g.reason)})` : ''}`, 'muted'); return; }
+  if (!f) { viewer.setOwnship(null); gpsStatus(esc(gps.error || 'Waiting for GPS…'), gps.error ? 'warn' : 'muted'); return; }
+  if (f.acc > 1000) { viewer.setOwnship(null); gpsStatus(`GPS signal too weak (±${Math.round(f.acc)} m)`, 'warn'); return; }
+  const p = toChart(g, f.lat, f.lon);
+  if (!p.inside) {
+    viewer.setOwnship(null);
+    const i = cur.a.info;
+    const [d, b] = i?.lat != null ? distBrg(f.lat, f.lon, i.lat, i.lon) : [null, null];
+    gpsStatus(`You're outside this chart${d != null ? ` · ${esc(cur.a.icao)} ${d < 10 ? d.toFixed(1) : Math.round(d)} nm, ${deg3(b)}°` : ''}`, 'muted');
+    return;
+  }
+  // PDF point -> page units of the viewer (unrotated page), heading as an angle on the page
+  const v0 = cur.page.getViewport({ scale: 1, rotation: cur.page.rotate });
+  const [x, y] = v0.convertToViewportPoint(p.x, p.y);
+  let hdg = null;
+  if (gps.heading != null) {
+    // a point 200 m ahead, so the chart's slight sideways stretch is accounted for
+    const h = gps.heading * Math.PI / 180, dm = 200;
+    const lat2 = f.lat + (dm * Math.cos(h)) / 111320;
+    const lon2 = f.lon + (dm * Math.sin(h)) / (111320 * Math.cos(f.lat * Math.PI / 180));
+    const q = toChart(g, lat2, lon2);
+    const [x2, y2] = v0.convertToViewportPoint(q.x, q.y);
+    hdg = Math.atan2(x2 - x, -(y2 - y)) * 180 / Math.PI;
+  }
+  const acc = f.acc * g.ay / 1852; // metres -> page units (ay = points per minute of latitude)
+  viewer.setOwnship({ x, y, hdg, acc, weak: f.acc > 100 });
+  const src = gps.headingSource === 'compass' ? ' (compass)' : gps.headingSource === 'blend' ? ' (blend)' : '';
+  gpsStatus(`±${Math.round(f.acc)} m · ${Math.round(f.kt)} kt${gps.heading != null ? ` · ${deg3(gps.heading)}°T${src}` : ''}`, f.acc > 100 ? 'warn' : '');
+}
+
+function gpsRun(on) {
+  if (on && S.kv.gps && document.visibilityState === 'visible') gps.start();
+  else gps.stop();
+}
+
 function ensureViewer(mode) {
   if (S.view === 'viewer' && viewer && S.viewerMode === mode) { flushSave(); return; }
   leaveViewer();
   viewerShell(mode);
   S.view = 'viewer';
+  gpsRun(mode === 'chart');
   viewer = new ChartViewer(document.getElementById('vstage'), {
     onSwipe: (dir) => stepChart(dir),
     onInkChange: (strokes) => queueSave(strokes),
@@ -1213,6 +1307,21 @@ const actions = {
     const on = toggleFav(c.icao, c.key);
     const b = document.getElementById('vfav'); b.textContent = on ? '★' : '☆'; b.classList.toggle('on', on);
   },
+  gps: async (t) => {
+    const on = !S.kv.gps;
+    setKv('gps', on);
+    t.classList.toggle('on', on);
+    if (on) {
+      await Gps.askCompass(); // iOS: must come from this tap
+      gpsRun(true);
+      const cur = S.cur;
+      if (cur?.kind === 'chart') chartGeo(cur).then(updateOwn);
+      toast('GPS on — situational awareness only');
+    } else {
+      gpsRun(false);
+    }
+    updateOwn();
+  },
   'v-rotate': () => {
     const c = S.cur; if (!c || !viewer) return;
     const k = `${c.icao}|${c.key}`;
@@ -1384,6 +1493,7 @@ async function start() {
   applyTheme();
   route();
   setupServiceWorker();
+  document.addEventListener('click', () => { if (S.kv.gps) Gps.askCompass(); }, { once: true, capture: true });
   // Check every airport's PDF is still on the device; flag any that aren't.
   for (const a of [...S.airports.values()]) {
     if (await store.pdfExists(a.file, a.where)) continue;

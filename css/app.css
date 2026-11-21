@@ -221,7 +221,7 @@ table.apts th { font-size: 13px; color: var(--muted); }
 .dimctl input { width: 110px; accent-color: var(--accent); }
 .vstage-wrap { position: relative; flex: 1; overflow: hidden; }
 .vstage { position: absolute; inset: 0; overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
-.pv-page { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; box-shadow: 0 2px 16px rgba(0, 0, 0, .4); }
+.pv-page { position: absolute; left: 0; top: 0; transform-origin: 0 0; box-shadow: 0 2px 16px rgba(0, 0, 0, .4); }
 .pv-paper { position: absolute; inset: 0; background: #fff; }
 .pv-base { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
 .pv-detail { position: absolute; }
@@ -318,3 +318,17 @@ table.apts th { font-size: 13px; color: var(--muted); }
 .fcat-MVFR { background: #1e5bd8; }
 .fcat-IFR { background: #d11; }
 .fcat-LIFR { background: #a020c0; }
+
+/* ---------- GPS own-ship ---------- */
+.own .own-plane { fill: #1e6fff; stroke: #fff; stroke-width: 2.2; stroke-linejoin: round; }
+.own .own-dot { fill: #1e6fff; stroke: #fff; stroke-width: 3; }
+.own .own-acc { fill: rgba(30, 111, 255, .12); stroke: rgba(30, 111, 255, .6); stroke-width: .6; }
+.own.weak .own-plane, .own.weak .own-dot { fill: #8a94a6; }
+.chart-night .own .own-plane, .chart-night .own .own-dot { fill: #3d8bff; stroke: #000; }
+.gpsbtn.on { background: var(--accent) !important; color: #fff; }
+.vgps { position: absolute; left: 8px; bottom: 8px; max-width: calc(100% - 16px); display: none; flex-direction: column; gap: 1px;
+  background: rgba(10, 20, 40, .82); color: #fff; padding: 6px 12px; border-radius: 12px; font-size: 15px; font-weight: 700; pointer-events: none; }
+.vgps.show { display: flex; }
+.vgps small { font-size: 10px; font-weight: 600; opacity: .75; text-transform: uppercase; letter-spacing: .3px; }
+.vgps.muted { font-weight: 500; }
+.vgps.warn { background: rgba(140, 80, 0, .9); }

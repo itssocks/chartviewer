@@ -11,6 +11,9 @@ const BASE_MAX_PIXELS = 6e6;    // full-page canvas size limit (iPad memory frie
 const DETAIL_MAX_PIXELS = 9e6;  // sharp "zoomed" canvas limit
 const MAX_ZOOM = 10;            // times the fit zoom
 
+// Plane seen from above, nose up, ~34 px long, centred on the position.
+const PLANE = 'M0,-17 C2,-17 2.6,-13 2.6,-9 L2.6,-4 L16,3 L16,6.5 L2.6,3 L2.6,10 L6.5,13.5 L6.5,16 L0,14.2 L-6.5,16 L-6.5,13.5 L-2.6,10 L-2.6,3 L-16,6.5 L-16,3 L-2.6,-4 L-2.6,-9 C-2.6,-13 -2,-17 0,-17 Z';
+
 export const PEN_WIDTHS = { thin: 1.6, thick: 3.2 };
 export const EDGE_BACK_PX = 24;
 const HIGHLIGHT_WIDTH = 10;
@@ -33,6 +36,13 @@ export class ChartViewer {
     this.svg.setAttribute('class', 'pv-ink');
     this.g = document.createElementNS(SVGNS, 'g');
     this.svg.append(this.g);
+    // Own-ship (GPS) icon, drawn in page units inside the rotated group, kept at a
+    // constant on-screen size.
+    this.own = null;
+    this.gOwn = document.createElementNS(SVGNS, 'g');
+    this.gOwn.setAttribute('class', 'own');
+    this.gOwn.innerHTML = `<circle class="own-acc" cx="0" cy="0" r="0"></circle>
+      <g class="own-icon"><path class="own-plane" d="${PLANE}"></path><circle class="own-dot" r="7"></circle></g>`;
     this.inner.append(this.paper, this.svg);
     stage.append(this.inner);
 
@@ -54,6 +64,7 @@ export class ChartViewer {
   /** Blank the view at once (so an old chart never shows under a new title). */
   clear() {
     this.gen++;
+    this.own = null;
     try { this.baseTask?.cancel(); this.detailTask?.cancel(); } catch { /* */ }
     this.base.width = this.base.height = 0;
     this._dropDetail();
@@ -151,7 +162,33 @@ export class ChartViewer {
     this.s = s; this.tx = tx; this.ty = ty;
     this.inner.style.transition = animate ? 'transform .18s ease-out' : 'none';
     this.inner.style.transform = `translate(${tx}px, ${ty}px) scale(${s})`;
+    this._drawOwn();
     this._scheduleDetail();
+  }
+
+  /**
+   * Show / move / hide the own-ship icon. o = null to hide, or
+   * { x, y } page units, hdg = degrees clockwise from page-up (null = no direction),
+   * acc = accuracy radius in page units, weak = draw greyed out.
+   */
+  setOwnship(o) {
+    this.own = o;
+    this._drawOwn();
+  }
+
+  _drawOwn() {
+    const o = this.own;
+    if (!o) { this.gOwn.remove(); return; }
+    if (this.gOwn.parentNode !== this.g) this.g.append(this.gOwn);
+    const k = 1.4 / (this.s || 1); // icon ~46 px on screen at any zoom
+    const icon = this.gOwn.querySelector('.own-icon');
+    icon.setAttribute('transform', `translate(${o.x} ${o.y}) rotate(${o.hdg ?? 0}) scale(${k})`);
+    this.gOwn.querySelector('.own-plane').style.display = o.hdg == null ? 'none' : '';
+    this.gOwn.querySelector('.own-dot').style.display = o.hdg == null ? '' : 'none';
+    const acc = this.gOwn.querySelector('.own-acc');
+    acc.setAttribute('cx', o.x); acc.setAttribute('cy', o.y);
+    acc.setAttribute('r', o.acc && o.acc * (this.s || 1) > 20 ? o.acc : 0); // only when bigger than the icon
+    this.gOwn.classList.toggle('weak', !!o.weak);
   }
 
   // ------------------------------------------------------------- rendering
@@ -185,7 +222,10 @@ export class ChartViewer {
   _scheduleDetail() {
     clearTimeout(this.detailTimer);
     if (this.detailTask) { try { this.detailTask.cancel(); } catch { /* */ } this.detailTask = null; }
-    this.detailTimer = setTimeout(() => this._renderDetail(), 160);
+    this.detailTimer = setTimeout(() => {
+      if (!this.pointers.size) this.inner.style.willChange = 'auto';
+      this._renderDetail();
+    }, 160);
   }
 
   async _renderDetail() {
@@ -221,6 +261,7 @@ export class ChartViewer {
   _drawInk() {
     this.g.innerHTML = '';
     for (const s of this.strokes) this.g.append(strokeEl(s));
+    this._drawOwn();
   }
 
   inkUndo() {
@@ -363,6 +404,9 @@ export class ChartViewer {
   }
 
   _gestureStart(t) {
+    // Smooth moving while a finger is down; dropped again when the chart settles
+    // (see _scheduleDetail) so Safari redraws it sharp instead of stretching a picture.
+    this.inner.style.willChange = 'transform';
     const pts = [...this.pointers.values()];
     this.g0 = { s: this.s, tx: this.tx, ty: this.ty, t, n: pts.length, moved: false };
     if (pts.length === 1) {

@@ -191,6 +191,7 @@ export async function parseAirportPdf(pdfjsLib, data, fileName, index) {
       numPages,
       charts,
       info: aptInfo || ie?.info || null,
+      aspectFixed: custom.AspectFix === '1',
       flags,
     };
   } finally {

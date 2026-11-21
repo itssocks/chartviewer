@@ -177,6 +177,13 @@ If step 4 fails, open the app once online, wait for "Ready for offline use", and
   straight back to the chart. ＋ adds a page; tap a page name to rename it.
 - **Backup (optional)**: ⚙︎ → **Save backup…** makes one small file with your chart notes,
   kneeboard pages, favorites and settings (Save to Files → On My iPad). **Restore backup…** brings it back.
+- **GPS on charts (➤)**: on a chart, tap ➤ to show your position as a blue plane - situational
+  awareness only, never for navigation. It appears on 10-9 airport diagrams and approach plan views
+  whose lat/lon labels pass strict checks (about 60 of the current charts), only inside the plan view.
+  Pointing: compass when slow (so pushback never shows you backwards), GPS track above 15 kt, a smooth
+  blend in between; if they disagree by more than 100 degrees the compass wins. The status line shows
+  accuracy, ground speed and heading, or why there's no position ("outside this chart", "not available
+  on this chart"). Tap ➤ again to hide it. iOS asks once for location and once for the compass.
 - ⚙︎ **Menus: Auto / Day / Night** for the app's own screens.
 
 ## Privacy
@@ -194,8 +201,11 @@ If step 4 fails, open the app once online, wait for "Ready for offline use", and
 | `js/app.js` | Screens, search, import, favorites, flight tabs |
 | `js/viewer.js` | Chart display, zoom, rotation, Pencil drawing |
 | `js/notepad.js` | Kneeboard page templates |
+| `js/gps.js` | GPS position and heading (compass / track blend) |
+| `js/georef.js` | Places GPS positions on charts from their lat/lon labels |
 | `js/pdfindex.js` | Reads bookmarks / metadata from the PDFs |
 | `js/store.js`, `js/opfs-worker.js` | On-device storage |
 | `sw.js` | Offline copy of the app (raise `VERSION` after any change) |
 | `vendor/pdfjs/` | Mozilla pdf.js 4.10.38 (Apache 2.0 licence), the PDF renderer |
 | `tools/make_icons.py` | Draws the Home Screen icons |
+| `tools/weather-relay.js` | Code for your Cloudflare weather relay |
